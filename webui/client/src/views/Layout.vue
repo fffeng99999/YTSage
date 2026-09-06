@@ -10,6 +10,10 @@
           <el-icon><Download /></el-icon>
           <span>{{ t('buttons.download') }}</span>
         </el-menu-item>
+        <el-menu-item index="/batch">
+          <el-icon><CopyDocument /></el-icon>
+          <span>{{ t('web.batch_title') }}</span>
+        </el-menu-item>
         <el-menu-item index="/jobs">
           <el-icon><List /></el-icon>
           <span>{{ t('history.title') === '历史' ? '任务' : 'Jobs' }}</span>
@@ -81,7 +85,7 @@ import { useI18n } from 'vue-i18n'
 import { ElMessageBox } from 'element-plus'
 import {
   VideoCamera, Download, List, Clock, Setting, Tools, Refresh,
-  InfoFilled, UserFilled, SwitchButton,
+  InfoFilled, UserFilled, SwitchButton, CopyDocument,
 } from '@element-plus/icons-vue'
 import { useAuthStore } from '@/stores/auth'
 import { useDownloadStore } from '@/stores/download'
@@ -103,6 +107,7 @@ const wsConnected = computed(() => downloadStore.connected)
 const pageTitle = computed(() => {
   switch (route.path) {
     case '/': return t('buttons.download')
+    case '/batch': return t('web.batch_title')
     case '/jobs': return t('web.jobs')
     case '/history': return t('history.title')
     case '/settings': return t('settings.title')

@@ -22,7 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from . import analysis_service, cookie_store, history_service, playlist_export, system_service, updater_service
+from . import analysis_service, channel_service, cookie_store, history_service, playlist_export, system_service, updater_service
 from .auth import create_token, set_password, verify_password, verify_token
 from .command_service import command_service
 from .download_manager import download_manager
@@ -40,6 +40,8 @@ from .official_bridge import (
 )
 from .schemas import (
     AnalyzeRequest,
+    BatchAnalyzeRequest,
+    ChannelAnalyzeRequest,
     CommandRunRequest,
     CookieApplyRequest,
     DownloadRequest,
@@ -206,6 +208,54 @@ async def analyze(req: AnalyzeRequest, auth: dict = Depends(get_current_user)):
     try:
         result = await analysis_service.analyze_url_async(
             url=req.url,
+            cookie_file=req.cookie_file or defaults["cookie_file"],
+            browser_cookies=req.browser_cookies or defaults["browser_cookies"],
+            proxy_url=req.proxy_url or defaults["proxy_url"],
+            geo_proxy_url=req.geo_proxy_url or defaults["geo_proxy_url"],
+        )
+        return result
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/analyze/batch")
+async def analyze_batch(req: BatchAnalyzeRequest, auth: dict = Depends(get_current_user)):
+    """Analyze multiple URLs at once (batch download page)."""
+    _ensure_not_updating()
+    if not req.urls:
+        raise HTTPException(status_code=400, detail="url_validation.empty_url")
+    generic = cfg_get("generic_mode")
+    generic = True if generic is None else bool(generic)
+
+    defaults = await asyncio.to_thread(build_download_defaults)
+    try:
+        results = await channel_service.analyze_batch(
+            urls=req.urls,
+            cookie_file=req.cookie_file or defaults["cookie_file"],
+            browser_cookies=req.browser_cookies or defaults["browser_cookies"],
+            proxy_url=req.proxy_url or defaults["proxy_url"],
+            geo_proxy_url=req.geo_proxy_url or defaults["geo_proxy_url"],
+            generic_mode=generic,
+        )
+        return {"results": results}
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/analyze/channel")
+async def analyze_channel(req: ChannelAnalyzeRequest, auth: dict = Depends(get_current_user)):
+    """Analyze a channel homepage URL (videos / shorts / streams tab)."""
+    _ensure_not_updating()
+    defaults = await asyncio.to_thread(build_download_defaults)
+    try:
+        result = await channel_service.analyze_channel_async(
+            url=req.url,
+            tab=req.tab,
+            limit=req.limit,
             cookie_file=req.cookie_file or defaults["cookie_file"],
             browser_cookies=req.browser_cookies or defaults["browser_cookies"],
             proxy_url=req.proxy_url or defaults["proxy_url"],

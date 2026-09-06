@@ -32,6 +32,7 @@ const routes = [
     meta: { requiresAuth: true },
     children: [
       { path: '', name: 'Dashboard', component: () => import('@/views/Dashboard.vue') },
+      { path: 'batch', name: 'Batch', component: () => import('@/views/Batch.vue') },
       { path: 'jobs', name: 'Jobs', component: () => import('@/views/Jobs.vue') },
       { path: 'history', name: 'History', component: () => import('@/views/History.vue') },
       { path: 'settings', name: 'Settings', component: () => import('@/views/Settings.vue') },

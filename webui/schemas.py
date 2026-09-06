@@ -24,6 +24,26 @@ class AnalyzeRequest(BaseModel):
     geo_proxy_url: Optional[str] = None
 
 
+class BatchAnalyzeRequest(BaseModel):
+    """Analyze many URLs at once (batch download page)."""
+    urls: List[str] = Field(default_factory=list)
+    cookie_file: Optional[str] = None
+    browser_cookies: Optional[str] = None
+    proxy_url: Optional[str] = None
+    geo_proxy_url: Optional[str] = None
+
+
+class ChannelAnalyzeRequest(BaseModel):
+    """Analyze a channel homepage URL for a specific tab."""
+    url: str
+    tab: str = Field(default="videos", pattern=r"^(videos|shorts|streams)$")
+    limit: int = Field(default=100, ge=1, le=1000)
+    cookie_file: Optional[str] = None
+    browser_cookies: Optional[str] = None
+    proxy_url: Optional[str] = None
+    geo_proxy_url: Optional[str] = None
+
+
 class DownloadRequest(BaseModel):
     """All fields mirror official DownloadThread.__init__ (ytsage_downloader.py L60-123).
 
