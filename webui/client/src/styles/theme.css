@@ -1,0 +1,116 @@
+/* YTSage Web UI dark-red theme, mirroring official ytsage_stylesheet.py:
+   window #15181b, panels #1b2021, primary red #c90000, borders #3d3d3d */
+
+:root {
+  --yts-bg: #15181b;
+  --yts-panel: #1b2021;
+  --yts-panel-2: #1d1e22;
+  --yts-red: #c90000;
+  --yts-red-dark: #a50000;
+  --yts-red-darker: #800000;
+  --yts-border: #3d3d3d;
+  --yts-text: #e8e8e8;
+  --yts-text-dim: #a0a0a0;
+
+  /* Element Plus overrides */
+  --el-color-primary: #c90000;
+  --el-color-primary-light-3: #a50000;
+  --el-color-primary-light-5: #800000;
+  --el-color-primary-light-7: #5c0000;
+  --el-color-primary-light-8: #4a0000;
+  --el-color-primary-light-9: #380000;
+  --el-color-primary-dark-2: #e02020;
+  --el-bg-color: #1b2021;
+  --el-bg-color-page: #15181b;
+  --el-bg-color-overlay: #1d1e22;
+  --el-text-color-primary: #e8e8e8;
+  --el-text-color-regular: #c8c8c8;
+  --el-text-color-secondary: #909399;
+  --el-border-color: #3d3d3d;
+  --el-border-color-light: #333;
+  --el-border-color-lighter: #2a2a2a;
+  --el-fill-color-blank: #1b2021;
+  --el-fill-color-light: #23282a;
+  --el-fill-color-lighter: #1f2426;
+  --el-mask-color: rgba(0, 0, 0, 0.7);
+}
+
+html.dark {
+  color-scheme: dark;
+}
+
+body {
+  background: var(--yts-bg);
+  color: var(--yts-text);
+  margin: 0;
+  font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+}
+
+/* Cards */
+.yts-card {
+  background: var(--yts-panel);
+  border: 1px solid var(--yts-border);
+  border-radius: 10px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+.yts-card-title {
+  font-weight: 600;
+  font-size: 15px;
+  margin-bottom: 12px;
+  color: var(--yts-text);
+}
+
+/* Shake animation for validation errors (official animate_widget_shake) */
+@keyframes yts-shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-5px); }
+  40% { transform: translateX(5px); }
+  60% { transform: translateX(-5px); }
+  80% { transform: translateX(5px); }
+}
+.yts-shake {
+  animation: yts-shake 0.35s ease;
+}
+
+/* Fade in (official animate_widget_fade_in) */
+@keyframes yts-fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.yts-fade-in {
+  animation: yts-fade-in 0.3s ease;
+}
+
+/* Format table quality colors (official color rules) */
+.q-best { color: #00e676; font-weight: 600; }
+.q-high { color: #8bc34a; }
+.q-medium { color: #ff9800; }
+.q-low { color: #f44336; }
+.fps-high { color: #00e676; }
+.fps-mid { color: #ff9800; }
+.fps-low { color: #f44336; }
+.hdr-tag { color: #26c6da; font-weight: 600; }
+.surround { color: #26c6da; }
+.merge-audio { color: #ff9800; }
+.lang-tag { color: #64b5f6; }
+
+/* Active red-outline buttons (subtitle/sponsorblock selected state) */
+.yts-active-outline {
+  border-color: var(--yts-red) !important;
+  color: #ff6b6b !important;
+}
+
+.console-output {
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+  background: #101214;
+  border: 1px solid var(--yts-border);
+  border-radius: 6px;
+  padding: 10px;
+  height: 320px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: #b8e986;
+}

@@ -1,0 +1,15 @@
+# Extra dependencies for YTSage Web UI (not part of official ytsage)
+# Install: pip install -r webui/requirements.txt
+
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.0.0
+websockets>=12.0
+
+# Required so official ytsage ConfigManager can be imported
+# (ytsage_logger depends on loguru); used for saving settings like language
+loguru>=0.7.3
+
+# Official package deps needed by ytsage.core.ytsage_ffmpeg / updater logic
+requests>=2.32.5
+packaging>=25.0
