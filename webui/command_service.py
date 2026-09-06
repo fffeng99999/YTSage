@@ -13,6 +13,7 @@ import sys
 import uuid
 from typing import Any, Dict, Optional
 
+from .download_manager import decode_output
 from .event_bus import bus
 from .official_bridge import SUBPROCESS_CREATIONFLAGS
 from .yt_dlp_finder import get_yt_dlp_path
@@ -65,7 +66,7 @@ class CommandService:
                     line = await proc.stdout.readline()
                     if not line:
                         break
-                    text = line.decode("utf-8", errors="replace").rstrip()
+                    text = decode_output(line).rstrip()
                     if text:
                         bus.publish({"type": "command_output", "exec_id": exec_id, "line": text})
                 rc = await proc.wait()

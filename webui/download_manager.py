@@ -18,6 +18,7 @@ Official parity notes:
 
 import asyncio
 import gc
+import locale
 import logging
 import re
 import shlex
@@ -54,6 +55,43 @@ if not logger.handlers:
     handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
+
+# On Windows, the frozen yt-dlp exe writes non-ASCII output (e.g. CJK file
+# names) using the system ANSI codepage (cp936 on zh_CN), NOT UTF-8, and
+# PYTHONIOENCODING has no effect on it. Note cp936 byte pairs often form
+# *valid* UTF-8 accidentally, so on Windows we must try ANSI first.
+# locale.getpreferredencoding() can return "utf-8" under modern Python
+# UTF-8 mode, so read the real ACP via ctypes (GetACP).
+def _detect_output_encoding() -> str:
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            acp = ctypes.windll.kernel32.GetACP()
+            return f"cp{acp}"
+        except Exception:
+            pass
+    try:
+        enc = locale.getpreferredencoding(False)
+        if enc and enc.lower().replace("-", "") not in ("utf8",):
+            return enc
+    except Exception:
+        pass
+    return "utf-8"
+
+
+_ANSI_ENCODING = _detect_output_encoding()
+
+
+def decode_output(data: bytes) -> str:
+    if sys.platform == "win32":
+        try:
+            return data.decode(_ANSI_ENCODING)
+        except (UnicodeDecodeError, LookupError):
+            return data.decode("utf-8", errors="replace")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode(_ANSI_ENCODING, errors="replace")
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +169,11 @@ def build_ytdlp_command(job: DownloadJob) -> List[str]:
     """Build yt-dlp command line. Adapted from official DownloadThread."""
     yt_dlp_path = get_yt_dlp_path()
     cmd: List[str] = [yt_dlp_path]
+
+    # Force progress lines to end with \n instead of \r-overwrite.
+    # Required because asyncio StreamReader.readline() only splits on \n;
+    # the official GUI gets this for free via text-mode universal newlines.
+    cmd.append("--newline")
 
     if job.concurrent_fragments:
         cmd.extend(["-N", str(job.concurrent_fragments)])
@@ -533,7 +576,7 @@ class DownloadManager:
                     continue
                 if not line:
                     break
-                text = line.decode("utf-8", errors="replace").strip()
+                text = decode_output(line).strip()
                 if text:
                     await self._parse_line(job, text)
         except Exception as e:

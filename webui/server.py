@@ -284,7 +284,9 @@ async def history_clear(auth: dict = Depends(get_current_user)):
 # ---------------------------------------------------------------------------
 
 @app.get("/api/thumbnail")
-async def thumbnail(url: str = Query(...), auth: dict = Depends(get_current_user)):
+async def thumbnail(url: str = Query(...)):
+    """Public: <img> tags cannot send Authorization headers.
+    Only proxies whitelisted image hosts, so no path exposure."""
     path = await asyncio.to_thread(fetch_thumbnail, url)
     if not path:
         raise HTTPException(status_code=404, detail="Thumbnail unavailable")

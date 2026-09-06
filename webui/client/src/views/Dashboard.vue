@@ -31,6 +31,45 @@
       </div>
     </div>
 
+    <!-- ===== download row ===== -->
+    <div class="yts-card">
+      <div class="url-row">
+        <el-input v-model="downloadPath" size="large" :placeholder="t('settings.download_path')" style="flex:1" :disabled="downloading">
+          <template #prepend>{{ t('settings.download_path') }}</template>
+        </el-input>
+        <el-button size="large" type="danger" :loading="starting" :disabled="!canDownload" @click="startDownload">
+          {{ t('buttons.download') }}
+        </el-button>
+        <el-button v-if="currentJob && currentJob.status === 'running'" size="large" @click="pauseJob">
+          {{ t('buttons.pause') }}
+        </el-button>
+        <el-button v-if="currentJob && currentJob.status === 'paused'" size="large" type="warning" @click="resumeJob">
+          {{ t('buttons.resume') }}
+        </el-button>
+        <el-button v-if="currentJob && ['running', 'paused'].includes(currentJob.status)" size="large" @click="cancelJob">
+          {{ t('buttons.cancel') }}
+        </el-button>
+        <el-button v-if="currentJob && currentJob.status === 'completed' && currentJob.last_file_path" size="large" @click="reveal(currentJob.last_file_path)">
+          📁
+        </el-button>
+      </div>
+
+      <!-- progress -->
+      <template v-if="currentJob">
+        <el-progress
+          :percentage="Math.min(100, currentJob.progress || 0)"
+          :stroke-width="14"
+          :status="progressStatus"
+          style="margin-top: 14px"
+        />
+        <div class="progress-meta">
+          <span>{{ statusText }}</span>
+          <span v-if="currentJob.speed">{{ t('download.speed') }}: {{ currentJob.speed }}</span>
+          <span v-if="currentJob.eta">{{ t('download.eta') }}: {{ currentJob.eta }}</span>
+        </div>
+      </template>
+    </div>
+
     <!-- ===== Video info ===== -->
     <div v-if="store.result && !analyzing" class="yts-card">
       <VideoInfoCard />
@@ -89,45 +128,6 @@
           <EmbedOptionsPanel />
         </el-popover>
       </div>
-    </div>
-
-    <!-- ===== download row ===== -->
-    <div class="yts-card">
-      <div class="url-row">
-        <el-input v-model="downloadPath" size="large" :placeholder="t('settings.download_path')" style="flex:1" :disabled="downloading">
-          <template #prepend>{{ t('settings.download_path') }}</template>
-        </el-input>
-        <el-button size="large" type="danger" :loading="starting" :disabled="!canDownload" @click="startDownload">
-          {{ t('buttons.download') }}
-        </el-button>
-        <el-button v-if="currentJob && currentJob.status === 'running'" size="large" @click="pauseJob">
-          {{ t('buttons.pause') }}
-        </el-button>
-        <el-button v-if="currentJob && currentJob.status === 'paused'" size="large" type="warning" @click="resumeJob">
-          {{ t('buttons.resume') }}
-        </el-button>
-        <el-button v-if="currentJob && ['running', 'paused'].includes(currentJob.status)" size="large" @click="cancelJob">
-          {{ t('buttons.cancel') }}
-        </el-button>
-        <el-button v-if="currentJob && currentJob.status === 'completed' && currentJob.last_file_path" size="large" @click="reveal(currentJob.last_file_path)">
-          📁
-        </el-button>
-      </div>
-
-      <!-- progress -->
-      <template v-if="currentJob">
-        <el-progress
-          :percentage="Math.min(100, currentJob.progress || 0)"
-          :stroke-width="14"
-          :status="progressStatus"
-          style="margin-top: 14px"
-        />
-        <div class="progress-meta">
-          <span>{{ statusText }}</span>
-          <span v-if="currentJob.speed">{{ t('download.speed') }}: {{ currentJob.speed }}</span>
-          <span v-if="currentJob.eta">{{ t('download.eta') }}: {{ currentJob.eta }}</span>
-        </div>
-      </template>
     </div>
 
     <!-- ===== recent downloads ===== -->
