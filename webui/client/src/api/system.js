@@ -16,6 +16,9 @@ export function openLogs() {
 export function cookiesStatus() {
   return api.get('/cookies/status').then((r) => r.data)
 }
+export function cookiesContent() {
+  return api.get('/cookies/content').then((r) => r.data)
+}
 export function applyCookies(payload) {
   return api.post('/cookies/apply', payload).then((r) => r.data)
 }

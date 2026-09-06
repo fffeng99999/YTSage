@@ -84,11 +84,17 @@ export const useAnalysisStore = defineStore('analysis', () => {
   const playlistEntries = computed(() => result.value?.playlist_entries || [])
   const formats = computed(() => result.value?.all_formats || [])
 
+  // Official sort: video by resolution desc, audio by bitrate desc
+  // (ytsage_gui_format_table.py L276-292 get_quality + reverse=True)
   const videoRows = computed(() =>
-    formats.value.filter(f => f.vcodec && f.vcodec !== 'none')
+    formats.value
+      .filter(f => f.vcodec && f.vcodec !== 'none')
+      .sort((a, b) => (b.height || 0) - (a.height || 0))
   )
   const audioRows = computed(() =>
-    formats.value.filter(f => (!f.vcodec || f.vcodec === 'none') && f.acodec && f.acodec !== 'none')
+    formats.value
+      .filter(f => (!f.vcodec || f.vcodec === 'none') && f.acodec && f.acodec !== 'none')
+      .sort((a, b) => (b.abr || 0) - (a.abr || 0))
   )
 
   const playlistItemsString = computed(() => {

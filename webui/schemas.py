@@ -89,7 +89,8 @@ class CookieApplyRequest(BaseModel):
     source: str = Field(pattern=r"^(browser|file)$")
     browser: Optional[str] = None
     profile: Optional[str] = None
-    file_path: Optional[str] = None
+    # Netscape cookie file content pasted by the user (saved server-side)
+    file_content: Optional[str] = None
     remember: bool = True
 
 

@@ -24,8 +24,17 @@
           </template>
           <template v-else>
             <el-form label-width="160px">
-              <el-form-item :label="t('cookies.cookie_file')">
-                <el-input v-model="ck.file_path" :placeholder="t('cookies.cookie_file_placeholder')" style="width: 420px" />
+              <el-form-item :label="t('web.cookie_content_label')">
+                <el-input
+                  v-model="ck.file_content"
+                  type="textarea"
+                  :rows="8"
+                  :placeholder="t('web.cookie_content_placeholder')"
+                  style="width: 560px"
+                />
+              </el-form-item>
+              <el-form-item>
+                <span class="help">{{ t('web.cookie_content_help') }}</span>
               </el-form-item>
             </el-form>
           </template>
@@ -107,7 +116,7 @@ import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus'
 import { useDownloadStore } from '@/stores/download'
 import { useSettingsStore } from '@/stores/settings'
-import { applyCookies as apiApply, clearCookies as apiClear, cookiesStatus } from '@/api/system'
+import { applyCookies as apiApply, clearCookies as apiClear, cookiesStatus, cookiesContent } from '@/api/system'
 import { runCommand } from '@/api/tools'
 import { errText } from '@/api/http'
 import { loadLocale } from '@/i18n'
@@ -151,6 +160,7 @@ async function applyCookies() {
 }
 async function clearCookies() {
   await apiClear()
+  ck.value.file_content = ''
   ElMessage.success(t('cookies.cleared_message'))
   loadStatus()
 }

@@ -22,7 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from . import analysis_service, history_service, playlist_export, system_service, updater_service
+from . import analysis_service, cookie_store, history_service, playlist_export, system_service, updater_service
 from .auth import create_token, set_password, verify_password, verify_token
 from .command_service import command_service
 from .download_manager import download_manager
@@ -370,14 +370,24 @@ async def cookies_status(auth: dict = Depends(get_current_user)):
     return {"active": active, "source": source, "detail": detail}
 
 
+@app.get("/api/cookies/content")
+async def cookies_content(auth: dict = Depends(get_current_user)):
+    """Return the saved cookie text (for prefilling the Tools page)."""
+    return {"content": await asyncio.to_thread(cookie_store.load_cookie_content)}
+
+
 @app.post("/api/cookies/apply")
 async def cookies_apply(req: CookieApplyRequest, auth: dict = Depends(get_current_user)):
     if req.source == "file":
-        if not req.file_path or not Path(req.file_path).exists():
-            raise HTTPException(status_code=400, detail="cookies.file_not_found")
+        content = (req.file_content or "").strip()
+        if not content:
+            raise HTTPException(status_code=400, detail="web.cookies_empty")
+        if not cookie_store.validate_netscape(content):
+            raise HTTPException(status_code=400, detail="web.cookies_invalid")
+        path = await asyncio.to_thread(cookie_store.save_cookie_content, content)
         cfg_set("cookie_source", "file")
-        cfg_set("cookie_file_path", req.file_path)
-        cfg_set("last_used_cookie_file", req.file_path)
+        cfg_set("cookie_file_path", str(path))
+        cfg_set("last_used_cookie_file", str(path))
     else:
         browser = req.browser or "chrome"
         cfg_set("cookie_source", "browser")
@@ -391,6 +401,7 @@ async def cookies_apply(req: CookieApplyRequest, auth: dict = Depends(get_curren
 @app.post("/api/cookies/clear")
 async def cookies_clear(auth: dict = Depends(get_current_user)):
     cfg_set("cookie_active", False)
+    await asyncio.to_thread(cookie_store.delete_cookie_file)
     return {"ok": True, "active": False}
 
 
