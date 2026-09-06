@@ -107,3 +107,11 @@ class YtdlpChannelRequest(BaseModel):
 class YtdlpAutoUpdateRequest(BaseModel):
     enabled: bool
     frequency: str = Field(pattern=r"^(startup|daily|weekly)$")
+
+
+class SetupCompleteRequest(BaseModel):
+    password: str
+    mode: str = "standalone"  # "standalone" | "shared"
+    download_path: Optional[str] = None
+    language: str = "en"
+    import_desktop: bool = False

@@ -153,18 +153,31 @@ class _FallbackConfig:
 _config_shim = _FallbackConfig()
 
 
+def _backend():
+    """Choose the settings backend at call time.
+
+    - setup not finished      -> standalone (empty defaults, wizard will fill)
+    - config_mode standalone  -> webui's own settings.json (NEVER touches the
+                                 desktop GUI directory - critical on Linux where
+                                 ~/.local/share/YTSage already exists)
+    - config_mode shared      -> official ConfigManager (opt-in, desktop sync)
+    """
+    from . import config_store
+    state = config_store.get_setup_state()
+    if state["config_mode"] == "shared" and _OfficialConfigManager is not None:
+        return _OfficialConfigManager
+    if _OfficialConfigManager is None:
+        return _config_shim
+    return config_store.standalone
+
+
 def cfg_get(key: str) -> Any:
     """Read a config value (sync; call via to_thread in async contexts)."""
-    if _OfficialConfigManager is not None:
-        return _OfficialConfigManager.get(key)
-    return _config_shim.get(key)
+    return _backend().get(key)
 
 
 def cfg_set(key: str, value: Any) -> None:
-    if _OfficialConfigManager is not None:
-        _OfficialConfigManager.set(key, value)
-    else:
-        _config_shim.set(key, value)
+    _backend().set(key, value)
 
 
 async def cfg_get_async(key: str) -> Any:

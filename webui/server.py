@@ -48,6 +48,7 @@ from .schemas import (
     PasswordChangeRequest,
     PlaylistExportRequest,
     RevealRequest,
+    SetupCompleteRequest,
     YtdlpAutoUpdateRequest,
     YtdlpChannelRequest,
 )
@@ -111,6 +112,10 @@ def _ensure_not_updating() -> None:
 
 @app.post("/api/auth/login")
 async def login(req: LoginRequest):
+    from . import config_store
+    if not config_store.get_setup_state()["setup_complete"]:
+        # First run: force the setup wizard (no default password accepted)
+        raise HTTPException(status_code=428, detail="Setup required")
     if verify_password(req.password):
         return {"token": create_token(), "expires_in": 7 * 24 * 3600}
     raise HTTPException(status_code=401, detail="Invalid password")
@@ -129,6 +134,58 @@ async def change_password(req: PasswordChangeRequest, auth: dict = Depends(get_c
         raise HTTPException(status_code=400, detail="New password too short (min 4 chars)")
     set_password(req.new_password)
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# First-run setup wizard (public endpoints - no auth before setup completes)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/setup/state")
+async def setup_state():
+    """Public: whether the first-run wizard is needed."""
+    from . import config_store
+    return config_store.get_setup_state()
+
+
+@app.get("/api/setup/defaults")
+async def setup_defaults():
+    """Public: wizard pre-fill values + environment capabilities."""
+    from . import config_store
+    from .official_bridge import HAS_CONFIG, USER_HOME_DIR
+    from .settings_service import SETTINGS_SCHEMA
+    state = config_store.get_setup_state()
+    return {
+        **state,
+        "download_path": str(USER_HOME_DIR / "Downloads"),
+        "language": cfg_get("language") or "en",
+        "desktop_config_available": HAS_CONFIG,
+        "suggested_settings": {k: d for k, (_v, d) in SETTINGS_SCHEMA.items()},
+    }
+
+
+@app.post("/api/setup/complete")
+async def setup_complete(req: SetupCompleteRequest):
+    """Public: finish the wizard - set password + choose config mode."""
+    from . import config_store
+    if len(req.password) < 4:
+        raise HTTPException(status_code=400, detail="web.password_too_short")
+    if req.mode not in ("standalone", "shared"):
+        raise HTTPException(status_code=400, detail="invalid mode")
+    if req.mode == "shared" and not HAS_CONFIG:
+        raise HTTPException(status_code=400, detail="desktop config not available")
+    from .settings_service import SETTINGS_SCHEMA
+    defaults = {k: d for k, (_v, d) in SETTINGS_SCHEMA.items()}
+    await asyncio.to_thread(
+        config_store.complete_setup,
+        req.password,
+        req.mode,
+        req.download_path or defaults["download_path"],
+        req.language if req.language in ("en", "zh") else "en",
+        req.import_desktop,
+        defaults,
+    )
+    # Auto-login right after setup
+    return {"ok": True, "token": create_token(), "expires_in": 7 * 24 * 3600}
 
 
 # ---------------------------------------------------------------------------

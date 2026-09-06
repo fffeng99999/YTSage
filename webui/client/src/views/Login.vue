@@ -76,6 +76,11 @@ async function handleLogin() {
     const redirect = route.query.redirect || '/'
     router.replace(redirect)
   } catch (e) {
+    if (e.response?.status === 428) {
+      localStorage.removeItem('ytsage_setup_done')
+      router.replace('/setup')
+      return
+    }
     const detail = e.response?.data?.detail
     ElMessage.error(detail === 'Invalid password' ? t('web.login_failed_invalid') : (detail || 'Login failed'))
   } finally {
