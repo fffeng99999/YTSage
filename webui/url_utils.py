@@ -45,6 +45,19 @@ _ERROR_RULES = [
         ("unable to extract", "extraction failed"),
         "ytdlp_errors.extraction_failed",
     ),
+    # Postprocessing (ffmpeg merge/remux/subtitle-embed) failures happen AFTER
+    # the download finished - they must NOT be reported as "cannot extract
+    # video info / check your link", which sends users looking at the URL.
+    (
+        (
+            "postprocessing",
+            "error opening input files",
+            "result too large",
+            "conversion failed",
+            "merging formats",
+        ),
+        "web.errors.postprocessing_failed",
+    ),
 ]
 
 

@@ -34,10 +34,11 @@ class BatchAnalyzeRequest(BaseModel):
 
 
 class ChannelAnalyzeRequest(BaseModel):
-    """Analyze a channel homepage URL for a specific tab."""
+    """Analyze a channel homepage URL for a specific tab (one page)."""
     url: str
     tab: str = Field(default="videos", pattern=r"^(videos|shorts|streams)$")
-    limit: int = Field(default=100, ge=1, le=1000)
+    page: int = Field(default=1, ge=1, le=200)
+    page_size: int = Field(default=50, ge=10, le=500)
     cookie_file: Optional[str] = None
     browser_cookies: Optional[str] = None
     proxy_url: Optional[str] = None

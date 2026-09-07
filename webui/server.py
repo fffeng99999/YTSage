@@ -255,7 +255,8 @@ async def analyze_channel(req: ChannelAnalyzeRequest, auth: dict = Depends(get_c
         result = await channel_service.analyze_channel_async(
             url=req.url,
             tab=req.tab,
-            limit=req.limit,
+            page=req.page,
+            page_size=req.page_size,
             cookie_file=req.cookie_file or defaults["cookie_file"],
             browser_cookies=req.browser_cookies or defaults["browser_cookies"],
             proxy_url=req.proxy_url or defaults["proxy_url"],
@@ -692,11 +693,15 @@ async def websocket_endpoint(ws: WebSocket):
 
 _CLIENT_DIST = Path(__file__).parent / "client" / "dist"
 
+# index.html must never be cached: it references hashed asset chunks, and a
+# stale copy makes browsers load old (deleted) JS after a rebuild.
+_INDEX_HEADERS = {"Cache-Control": "no-cache, no-store, must-revalidate"}
+
 
 @app.get("/", include_in_schema=False)
 async def serve_index():
     if _CLIENT_DIST.exists():
-        return FileResponse(_CLIENT_DIST / "index.html")
+        return FileResponse(_CLIENT_DIST / "index.html", headers=_INDEX_HEADERS)
     return JSONResponse(
         {"error": "Frontend not built. Run 'cd webui/client && npm run build' first."},
         status_code=503,
@@ -719,11 +724,15 @@ async def serve_static(full_path: str):
     except ValueError:
         raise HTTPException(status_code=404)
     if target.is_file():
-        return FileResponse(target)
+        # Hashed build assets are immutable -> cache forever; everything else
+        # (including any index.html fallback) must not be cached.
+        if full_path.startswith("assets/"):
+            return FileResponse(target, headers={"Cache-Control": "public, max-age=31536000, immutable"})
+        return FileResponse(target, headers=_INDEX_HEADERS)
 
     index = _CLIENT_DIST / "index.html"
     if index.exists():
-        return FileResponse(index)
+        return FileResponse(index, headers=_INDEX_HEADERS)
 
     raise HTTPException(status_code=404)
 

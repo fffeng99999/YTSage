@@ -28,10 +28,12 @@
           <el-radio :model-value="selectedPreset" :label="row.format_id" @change="onPresetSelect(row)"><span /></el-radio>
         </template>
       </el-table-column>
-      <el-table-column :label="t('formats.quality')" prop="quality" min-width="140">
-        <template #default="{ row }"><span :class="qualityClass(row.quality)">{{ row.quality }}</span></template>
+      <el-table-column :label="t('formats.quality')" min-width="140">
+        <template #default="{ row }"><span :class="qualityClass(presetLabel(row))">{{ presetLabel(row) }}</span></template>
       </el-table-column>
-      <el-table-column :label="t('formats.resolution')" prop="resolution" min-width="120" />
+      <el-table-column :label="t('formats.resolution')" min-width="120">
+        <template #default="{ row }">{{ presetResLabel(row) }}</template>
+      </el-table-column>
     </el-table>
 
     <!-- Single video mode: full format table -->
@@ -103,7 +105,7 @@ import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAnalysisStore, PLAYLIST_PRESETS } from '@/stores/analysis'
 
-const { t } = useI18n()
+const { t, te } = useI18n()
 const store = useAnalysisStore()
 
 const isPlaylist = computed(() => store.isPlaylist)
@@ -119,6 +121,13 @@ const visibleRows = computed(() =>
 
 function isVideoRow(row) {
   return row.vcodec && row.vcodec !== 'none'
+}
+// Localized preset labels (fall back to the English fields for unknown keys)
+function presetLabel(row) {
+  return row.ikey && te(`web.presets.${row.ikey}`) ? t(`web.presets.${row.ikey}`) : row.quality
+}
+function presetResLabel(row) {
+  return row.ikey && te(`web.presetsRes.${row.ikey}`) ? t(`web.presetsRes.${row.ikey}`) : row.resolution
 }
 function hasAudio(row) {
   return row.acodec && row.acodec !== 'none'

@@ -123,7 +123,7 @@
         <el-checkbox v-model="store.saveDescription">{{ t('main_ui.save_description') }}</el-checkbox>
         <el-popover placement="top" :width="180" trigger="click">
           <template #reference>
-            <el-button size="small" text>▸ Embed</el-button>
+            <el-button size="small" text>▸ {{ t('web.embed') }}</el-button>
           </template>
           <EmbedOptionsPanel />
         </el-popover>
@@ -167,6 +167,7 @@ import SubtitleDialog from '@/components/SubtitleDialog.vue'
 import SponsorBlockDialog from '@/components/SponsorBlockDialog.vue'
 import PlaylistDialog from '@/components/PlaylistDialog.vue'
 import TimeRangeDialog from '@/components/TimeRangeDialog.vue'
+import EmbedOptionsPanel from '@/components/EmbedOptionsPanel.vue'
 
 const { t } = useI18n()
 const route = useRoute()

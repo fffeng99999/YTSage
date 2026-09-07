@@ -112,23 +112,31 @@ def _entry_thumbnail(entry: Dict[str, Any]) -> Optional[str]:
 def analyze_channel(
     url: str,
     tab: str = "videos",
-    limit: int = 100,
+    page: int = 1,
+    page_size: int = 50,
     cookie_file: Optional[str] = None,
     browser_cookies: Optional[str] = None,
     proxy_url: Optional[str] = None,
     geo_proxy_url: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Parse a channel tab URL into a list of videos (flat, fast)."""
+    """Parse one page of a channel tab URL into a list of videos (flat, fast).
+
+    page_size entries per page; global 1-based positions are preserved so the
+    frontend can build --playlist-items across pages.
+    """
     norm_url, err_key = normalize_channel_url(url, tab)
     if err_key:
         raise RuntimeError(err_key)
 
     yt_dlp_path = get_yt_dlp_path()
-    limit = max(1, min(int(limit or 100), 1000))
+    page = max(1, int(page or 1))
+    page_size = max(1, min(int(page_size or 50), 500))
+    start = (page - 1) * page_size + 1
+    end = page * page_size
 
     cmd = [
         yt_dlp_path, "--dump-single-json", "--flat-playlist", "--no-warnings",
-        "--playlist-end", str(limit), norm_url,
+        "--playlist-start", str(start), "--playlist-end", str(end), norm_url,
     ]
     build_auth_options(cmd, cookie_file, browser_cookies, proxy_url, geo_proxy_url)
 
@@ -146,12 +154,12 @@ def analyze_channel(
         raise RuntimeError("web.channel_err.not_a_channel")
 
     raw_entries = [e for e in (info.get("entries") or []) if e]
-    # index = array position (1-based): this is what --playlist-items selects on
-    # the same tab URL, so it must match the order we show in the table.
+    # index = GLOBAL 1-based position in the tab (start + array offset):
+    # this is what --playlist-items selects on the same tab URL.
     entries = []
     for i, e in enumerate(raw_entries):
         entries.append({
-            "index": i + 1,
+            "index": start + i,
             "id": e.get("id"),
             "title": e.get("title"),
             "url": e.get("url") or (f"https://www.youtube.com/watch?v={e.get('id')}" if e.get("id") else None),
@@ -159,6 +167,9 @@ def analyze_channel(
             "thumbnail": _entry_thumbnail(e),
         })
 
+    # playlist_count = true total when the extractor knows it (channel tabs do)
+    total = info.get("playlist_count")
+    has_more = len(raw_entries) == page_size
     channel_result: Dict[str, Any] = {
         "channel_info": {
             "title": info.get("title") or info.get("channel") or info.get("uploader"),
@@ -168,7 +179,10 @@ def analyze_channel(
             "normalized_url": norm_url,
         },
         "entries": entries,
-        "total": len(entries),
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "has_more": has_more,
     }
     channel_result["analysis_id"] = cache_put(channel_result)
     return channel_result
@@ -177,14 +191,15 @@ def analyze_channel(
 async def analyze_channel_async(
     url: str,
     tab: str = "videos",
-    limit: int = 100,
+    page: int = 1,
+    page_size: int = 50,
     cookie_file: Optional[str] = None,
     browser_cookies: Optional[str] = None,
     proxy_url: Optional[str] = None,
     geo_proxy_url: Optional[str] = None,
 ) -> Dict[str, Any]:
     return await asyncio.to_thread(
-        analyze_channel, url, tab, limit,
+        analyze_channel, url, tab, page, page_size,
         cookie_file, browser_cookies, proxy_url, geo_proxy_url,
     )
 
@@ -234,6 +249,7 @@ async def _analyze_one(
             "duration_string": None,
             "count": len(entries),
         }
+        formats: List[Dict[str, Any]] = []
     else:
         vs = res.get("video_summary") or {}
         summary = {
@@ -243,12 +259,23 @@ async def _analyze_one(
             "duration_string": vs.get("duration_string"),
             "count": None,
         }
+        # Compact format list so the batch page can pick REAL format ids
+        # exactly like the Dashboard single-video flow (codec priority
+        # av01 > vp09 > avc1 is applied client-side).
+        formats = [
+            {k: f.get(k) for k in
+             ("format_id", "ext", "height", "fps", "vcodec", "acodec", "tbr", "abr")
+             if f.get(k) is not None}
+            for f in (res.get("all_formats") or [])
+        ]
     return {
         "url": url,
         "ok": True,
         "is_playlist": bool(res.get("is_playlist")),
         "analysis_id": res.get("analysis_id"),
         "summary": summary,
+        "formats": formats,
+        "subtitles": res.get("subtitles") or [],
     }
 
 

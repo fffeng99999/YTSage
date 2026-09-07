@@ -94,6 +94,10 @@
             <el-form-item>
               <span class="help">{{ t('settings.filename_format_help') }}</span>
             </el-form-item>
+            <!-- Drag-and-drop block builder; keeps the input above in sync -->
+            <el-form-item :label="t('web.filename.sequence')">
+              <FilenameBuilder v-model="form.filename_format" />
+            </el-form-item>
           </el-form>
         </div>
       </el-tab-pane>
@@ -132,6 +136,7 @@ import { ElMessage } from 'element-plus'
 import { useSettingsStore } from '@/stores/settings'
 import { changePassword } from '@/api/auth'
 import { errText } from '@/api/http'
+import FilenameBuilder from '@/components/FilenameBuilder.vue'
 
 const { t } = useI18n()
 const settingsStore = useSettingsStore()

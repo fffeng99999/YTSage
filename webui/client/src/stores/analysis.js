@@ -8,17 +8,19 @@ import { ref, computed } from 'vue'
 import { analyzeUrl } from '@/api/download'
 
 // Official playlist preset table (ytsage_gui_format_table.py L349-360)
+// `ikey` maps to WEB_EXTRA `web.presets.*` for localized display; `quality`
+// and `resolution` stay as English fallbacks.
 export const PLAYLIST_PRESETS = [
-  { quality: 'Best Available', resolution: 'Max Quality', format_id: 'bestvideo+bestaudio/best' },
-  { quality: '2160p (4K)', resolution: '≤ 3840x2160', format_id: 'bestvideo[height<=2160]+bestaudio/best/best[height<=2160]' },
-  { quality: '1440p (2K)', resolution: '≤ 2560x1440', format_id: 'bestvideo[height<=1440]+bestaudio/best/best[height<=1440]' },
-  { quality: '1080p (Full HD)', resolution: '≤ 1920x1080', format_id: 'bestvideo[height<=1080]+bestaudio/best/best[height<=1080]' },
-  { quality: '720p (HD)', resolution: '≤ 1280x720', format_id: 'bestvideo[height<=720]+bestaudio/best/best[height<=720]' },
-  { quality: '480p', resolution: '≤ 854x480', format_id: 'bestvideo[height<=480]+bestaudio/best/best[height<=480]' },
-  { quality: '360p', resolution: '≤ 640x360', format_id: 'bestvideo[height<=360]+bestaudio/best/best[height<=360]' },
-  { quality: '240p', resolution: '≤ 426x240', format_id: 'bestvideo[height<=240]+bestaudio/best/best[height<=240]' },
-  { quality: '144p', resolution: '≤ 256x144', format_id: 'bestvideo[height<=144]+bestaudio/best/best[height<=144]' },
-  { quality: 'Lowest Available', resolution: 'Worst Available', format_id: 'worstvideo+bestaudio/worst' },
+  { ikey: 'best', quality: 'Best Available', resolution: 'Max Quality', format_id: 'bestvideo+bestaudio/best' },
+  { ikey: '2160', quality: '2160p (4K)', resolution: '≤ 3840x2160', format_id: 'bestvideo[height<=2160]+bestaudio/best/best[height<=2160]' },
+  { ikey: '1440', quality: '1440p (2K)', resolution: '≤ 2560x1440', format_id: 'bestvideo[height<=1440]+bestaudio/best/best[height<=1440]' },
+  { ikey: '1080', quality: '1080p (Full HD)', resolution: '≤ 1920x1080', format_id: 'bestvideo[height<=1080]+bestaudio/best/best[height<=1080]' },
+  { ikey: '720', quality: '720p (HD)', resolution: '≤ 1280x720', format_id: 'bestvideo[height<=720]+bestaudio/best/best[height<=720]' },
+  { ikey: '480', quality: '480p', resolution: '≤ 854x480', format_id: 'bestvideo[height<=480]+bestaudio/best/best[height<=480]' },
+  { ikey: '360', quality: '360p', resolution: '≤ 640x360', format_id: 'bestvideo[height<=360]+bestaudio/best/best[height<=360]' },
+  { ikey: '240', quality: '240p', resolution: '≤ 426x240', format_id: 'bestvideo[height<=240]+bestaudio/best/best[height<=240]' },
+  { ikey: '144', quality: '144p', resolution: '≤ 256x144', format_id: 'bestvideo[height<=144]+bestaudio/best/best[height<=144]' },
+  { ikey: 'worst', quality: 'Lowest Available', resolution: 'Worst Available', format_id: 'worstvideo+bestaudio/worst' },
 ]
 
 // Official SponsorBlock categories (ytsage_dialogs_custom.py)

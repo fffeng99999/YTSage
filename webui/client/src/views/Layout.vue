@@ -16,7 +16,7 @@
         </el-menu-item>
         <el-menu-item index="/jobs">
           <el-icon><List /></el-icon>
-          <span>{{ t('history.title') === '历史' ? '任务' : 'Jobs' }}</span>
+          <span>{{ t('web.jobs') }}</span>
           <el-badge v-if="activeCount > 0" :value="activeCount" class="job-badge" />
         </el-menu-item>
         <el-menu-item index="/history">
