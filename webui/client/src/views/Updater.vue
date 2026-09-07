@@ -48,7 +48,12 @@
       <div v-if="ff.busy" class="console-output" style="height: 120px; margin-top: 10px">{{ ff.log }}</div>
       <div class="row">
         <el-button size="small" @click="checkFf" :loading="ff.checking">{{ t('ffmpeg_updater.check_updates') }}</el-button>
-        <el-button size="small" type="primary" :disabled="ff.installed || ff.busy" @click="installFf">{{ t('ffmpeg.install_button') }}</el-button>
+        <el-button
+          size="small"
+          type="primary"
+          :disabled="(ff.installed && !ff.update_available) || ff.busy"
+          @click="installFf"
+        >{{ ff.installed ? t('web.ffmpeg.update_button') : t('ffmpeg.install_button') }}</el-button>
         <a href="https://github.com/yt-dlp/yt-dlp/wiki/FFmpeg-Guide" target="_blank" class="doc-link">{{ t('ffmpeg.manual_guide') }}</a>
       </div>
     </div>
@@ -157,7 +162,7 @@ watch(() => downloadStore.updaterEvents, (ev) => {
   if (ev.ffmpeg) {
     const e = ev.ffmpeg
     if (e.state === 'installing') { ff.value.busy = true; if (e.message) ff.value.log += e.message + '\n' }
-    else if (e.state === 'done') { ff.value.busy = false; ElMessage.success(t('ffmpeg.install_success')); checkFf() }
+    else if (e.state === 'done') { ff.value.busy = false; ElMessage.success(e.updated ? t('web.ffmpeg.update_success') : t('ffmpeg.install_success')); checkFf() }
     else if (e.state === 'failed') { ff.value.busy = false; ElMessage.error(t('ffmpeg.installation_failed')) }
   }
   if (ev.deno) {
@@ -203,7 +208,12 @@ async function checkFf() {
 }
 async function installFf() {
   ff.value.busy = true; ff.value.log = ''
-  try { const r = await installFfmpeg(); if (!r.success) ElMessage.error(t('ffmpeg.installation_failed')) }
+  try {
+    const r = await installFfmpeg()
+    if (!r.success) ElMessage.error(t('ffmpeg.installation_failed'))
+    else if (r.noop) ElMessage.info(t('ffmpeg_updater.status_up_to_date'))
+    else ElMessage.success(r.updated ? t('web.ffmpeg.update_success') : t('ffmpeg.install_success'))
+  }
   catch (e) { ElMessage.error(errText(e)) }
   finally { ff.value.busy = false; checkFf() }
 }

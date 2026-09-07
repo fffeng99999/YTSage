@@ -59,6 +59,10 @@ const WEB_EXTRA = {
       batch_title: 'Batch & Channel',
       clipboard_manual_paste: 'Direct clipboard access is unavailable (page not opened via https/localhost). Paste the link here with Ctrl+V:',
       clipboard_manual_placeholder: 'Paste here (Ctrl+V)…',
+      ffmpeg: {
+        update_button: 'Update FFmpeg',
+        update_success: 'FFmpeg updated successfully',
+      },
       errors: {
         postprocessing_failed: "The download finished but post-processing failed (merging / subtitle embedding / SponsorBlock chapter editing). The link is fine - try again with SponsorBlock or 'merge subtitles' turned off, or pick a different quality. Details: {error}",
       },
@@ -181,6 +185,10 @@ const WEB_EXTRA = {
       batch_title: '批量下载',
       clipboard_manual_paste: '无法直接读取剪贴板(页面未通过 https/localhost 打开)。请在此按 Ctrl+V 粘贴链接:',
       clipboard_manual_placeholder: '在此粘贴(Ctrl+V)…',
+      ffmpeg: {
+        update_button: '更新 FFmpeg',
+        update_success: 'FFmpeg 更新成功',
+      },
       errors: {
         postprocessing_failed: "视频已下载完成，但后处理失败（合并、内嵌字幕或 SponsorBlock 章节编辑）。链接本身没有问题——请尝试关闭 SponsorBlock 或“合并字幕”后重试，或换一种画质。详情：{error}",
       },

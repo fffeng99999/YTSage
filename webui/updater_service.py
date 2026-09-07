@@ -33,6 +33,7 @@ from .event_bus import bus
 from .official_bridge import (
     APP_BIN_DIR,
     DENO_APP_BIN_PATH,
+    FFMPEG_ZIP_DOWNLOAD_URL,
     HAS_FFMPEG_CORE,
     OS_NAME,
     SUBPROCESS_CREATIONFLAGS,
@@ -301,11 +302,15 @@ def ffmpeg_check() -> Dict[str, Any]:
     installed = current not in ("Not found",) and not current.startswith("Error")
     latest = ffmpeg_latest_version()
     available = False
-    if installed and latest:
+    # current looks like "9.0.1-essentials_build-www.gyan.dev" -> compare only
+    # the leading numeric version, otherwise every check reports an update.
+    m = re.match(r"(\d+(?:\.\d+)*)", current or "")
+    cur_v = m.group(1) if m else ""
+    if installed and latest and cur_v:
         try:
-            available = _pkg_version.parse(latest) > _pkg_version.parse(re.sub(r"^n", "", current))
+            available = _pkg_version.parse(latest) > _pkg_version.parse(cur_v)
         except Exception:
-            available = latest != current
+            available = latest != cur_v
     return {"installed": installed, "current": current, "latest": latest or "Unknown", "update_available": available}
 
 
@@ -328,20 +333,171 @@ def ffmpeg_install_sync(progress_cb=None) -> bool:
     raise RuntimeError("ffmpeg_install_unavailable")
 
 
+def _ffmpeg_pick_latest_bin(extract_dir: Path) -> Optional[Path]:
+    """Newest ffmpeg-*-essentials_build/bin under extract_dir (version-aware sort).
+
+    Official get_ffmpeg_install_path() sorts by NAME, which breaks for
+    two-digit majors (ffmpeg-9 > ffmpeg-10). Parse versions properly here.
+    """
+    best = None
+    best_key = None
+    for item in extract_dir.glob("ffmpeg-*-essentials_build"):
+        if not item.is_dir():
+            continue
+        bin_dir = item / "bin"
+        if not (bin_dir / "ffmpeg.exe").exists():
+            continue
+        m = re.search(r"ffmpeg-(\d+)\.(\d+)(?:\.(\d+))?", item.name)
+        key = tuple(int(x or 0) for x in (m.groups() if m else (0, 0, 0)))
+        if best_key is None or key > best_key:
+            best, best_key = bin_dir, key
+    return best
+
+
+def _ffmpeg_persist_path_windows(bin_dir: Path) -> None:
+    """Persist the new ffmpeg bin on the USER PATH (registry), NOT via setx.
+
+    `setx PATH <merged>` silently truncates to 1024 chars and would flatten
+    system+user PATH into the user key - both are environment corruption.
+    Writing HKCU\\Environment\\Path keeps the two scopes separate and has no
+    length limit. A WM_SETTINGCHANGE broadcast wakes up Explorer shells.
+    """
+    try:
+        import winreg
+    except ImportError:
+        logger.warning("[WebUI] winreg unavailable, PATH not persisted")
+        return
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_READ | winreg.KEY_WRITE) as key:
+            try:
+                user_path, _ = winreg.QueryValueEx(key, "Path")
+            except FileNotFoundError:
+                user_path = ""
+        entries = [p for p in str(user_path).split(os.pathsep) if p.strip()]
+        cleaned = [p for p in entries if "ffmpeg" not in p.lower()]
+        cleaned.insert(0, str(bin_dir))
+        new_user_path = os.pathsep.join(cleaned)
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_WRITE) as key:
+            winreg.SetValueEx(key, "Path", 0, winreg.REG_EXPAND_SZ, new_user_path)
+        # Broadcast so already-running Explorer picks it up
+        try:
+            import ctypes
+            HWND_BROADCAST = 0xFFFF
+            WM_SETTINGCHANGE = 0x1A
+            SMTO_ABORTIFHUNG = 0x0002
+            ctypes.windll.user32.SendMessageTimeoutW(
+                HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Environment",
+                SMTO_ABORTIFHUNG, 5000,
+            )
+        except Exception:
+            pass
+        logger.info(f"[WebUI] User PATH updated with {bin_dir}")
+    except Exception as e:
+        logger.warning(f"[WebUI] failed to persist user PATH: {e}")
+
+
+def ffmpeg_update_sync(progress_cb=None) -> bool:
+    """Force-update FFmpeg on Windows (official installer no-ops when installed).
+
+    Downloads the latest essentials build zip from gyan.dev, extracts it next
+    to the existing install, then puts the NEW bin directory first on PATH
+    (session + persistent via setx, mirroring the official installer).
+    """
+    _busy_guard()
+    if OS_NAME != "Windows":
+        # Non-Windows: fall back to the official installer (brew/apt based)
+        return ffmpeg_install_sync(progress_cb=progress_cb)
+
+    import tempfile
+    import zipfile
+
+    def say(msg):
+        if progress_cb:
+            progress_cb(str(msg))
+
+    try:
+        extract_dir = Path(os.getenv("LOCALAPPDATA")) / "ffmpeg"
+        extract_dir.mkdir(exist_ok=True)
+
+        say("⬇ Downloading FFmpeg update (zip)...")
+        temp = tempfile.NamedTemporaryFile(delete=False, suffix=".zip").name
+        try:
+            resp = requests.get(FFMPEG_ZIP_DOWNLOAD_URL, stream=True, timeout=120)
+            resp.raise_for_status()
+            total = int(resp.headers.get("content-length") or 0)
+            done = 0
+            last_pct = -10
+            with open(temp, "wb") as f:
+                for chunk in resp.iter_content(65536):
+                    f.write(chunk)
+                    done += len(chunk)
+                    if total:
+                        pct = int(done * 100 / total)
+                        if pct - last_pct >= 10:
+                            say(f"  {pct}%")
+                            last_pct = pct
+            if HAS_FFMPEG_CORE and hasattr(_ffcore, "verify_sha256"):
+                try:
+                    say("🔐 Verifying download integrity...")
+                    if not _ffcore.verify_sha256(temp, _ffcore.FFMPEG_ZIP_SHA256_URL):
+                        say("⚠️ SHA-256 verification failed, proceeding anyway...")
+                except Exception:
+                    pass
+            say("⚙ Extracting FFmpeg...")
+            with zipfile.ZipFile(temp, "r") as zf:
+                zf.extractall(extract_dir)
+        finally:
+            try:
+                Path(temp).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        bin_dir = _ffmpeg_pick_latest_bin(extract_dir)
+        if not bin_dir:
+            say("❌ Could not locate extracted FFmpeg bin directory")
+            return False
+
+        say("🔧 Updating PATH...")
+        _ffmpeg_persist_path_windows(bin_dir)
+        # Session PATH: prepend the new bin so this process (and the yt-dlp
+        # subprocesses it spawns) immediately use the updated ffmpeg.
+        parts = os.environ.get("PATH", "").split(os.pathsep)
+        cleaned = [p for p in parts if "ffmpeg" not in p.lower()]
+        cleaned.insert(0, str(bin_dir))
+        os.environ["PATH"] = os.pathsep.join(cleaned)
+
+        say("✅ Verifying update...")
+        r = _run([str(bin_dir / "ffmpeg.exe"), "-version"], timeout=15)
+        ok = r.returncode == 0
+        say("✅ FFmpeg update completed!" if ok else "❌ FFmpeg update verification failed")
+        return ok
+    except Exception as e:
+        logger.error(f"[WebUI] ffmpeg update failed: {e}")
+        say(f"❌ FFmpeg update failed: {e}")
+        return False
+
+
 async def ffmpeg_install_async() -> Dict[str, Any]:
-    _emit("ffmpeg", state="installing", message="start")
+    """Install when missing, force-update when a newer build is available."""
+    info = await ffmpeg_check_async()
+    is_update = bool(info.get("installed") and info.get("update_available"))
+    if info.get("installed") and not is_update:
+        return {"success": True, "noop": True, "updated": False}
+
+    fn = ffmpeg_update_sync if is_update else ffmpeg_install_sync
+    _emit("ffmpeg", state="installing", message="update start" if is_update else "start")
     loop = asyncio.get_running_loop()
 
     def cb(msg):
         loop.call_soon_threadsafe(_emit, "ffmpeg", state="installing", message=msg)
 
     try:
-        ok = await asyncio.to_thread(ffmpeg_install_sync, cb)
-        _emit("ffmpeg", state="done" if ok else "failed")
-        return {"success": ok}
+        ok = await asyncio.to_thread(fn, cb)
+        _emit("ffmpeg", state="done" if ok else "failed", updated=is_update)
+        return {"success": ok, "updated": is_update}
     except Exception as e:
         _emit("ffmpeg", state="failed", message=str(e))
-        return {"success": False, "error": str(e)}
+        return {"success": False, "updated": is_update, "error": str(e)}
 
 
 # ---------------------------------------------------------------------------
