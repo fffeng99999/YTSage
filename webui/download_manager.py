@@ -248,11 +248,13 @@ def build_ytdlp_command(job: DownloadJob) -> List[str]:
     # --- Output template ---
     base_path = Path(job.path).as_posix()
     filename_part = job.filename_format or "%(title)s_%(resolution)s_[%(id)s].%(ext)s"
+    # Each video gets its own folder named after the title so that related
+    # files (video, .description, subtitles, .info.json) stay together.
     if job.is_playlist:
-        output_template = f"{base_path}/%(playlist_title)s/{filename_part}"
+        output_template = f"{base_path}/%(playlist_title)s/%(title)s/{filename_part}"
     else:
         filename_part = re.sub(r'%\(playlist_index[^)]*\)[a-zA-Z0-9]*\s*(?:[-_]\s*)?', '', filename_part)
-        output_template = f"{base_path}/{filename_part}"
+        output_template = f"{base_path}/%(title)s/{filename_part}"
     cmd.extend(["-o", output_template])
     cmd.append("--force-overwrites")
 
@@ -353,14 +355,17 @@ def _safe_delete_with_retry(file_path: Path, max_retries: int = 3, delay: float 
 
 
 def cleanup_partial_files(path: str) -> None:
-    """Official: cleanup_partial_files (L125-133): .part + .f<digits>."""
+    """Official: cleanup_partial_files (L125-133): .part + .f<digits>.
+
+    Recursive because each video now downloads into its own subfolder.
+    """
     try:
         pattern = re.compile(r"\.f\d+\.")
         base = Path(path)
         if not base.exists():
             return
-        for file_path in base.iterdir():
-            if file_path.suffix == ".part" or pattern.search(file_path.name):
+        for file_path in base.rglob("*"):
+            if file_path.is_file() and (file_path.suffix == ".part" or pattern.search(file_path.name)):
                 _safe_delete_with_retry(file_path)
     except Exception as e:
         logger.warning(f"[WebUI] partial cleanup error: {e}")
@@ -448,16 +453,6 @@ class DownloadManager:
 
         job = DownloadJob(**{k: v for k, v in job_data.items() if k in DownloadJob.__dataclass_fields__})
         self._jobs[job_id] = job
-
-        # Save thumbnail before download (official: ytsage_gui_main.py L894-901)
-        if job.save_thumbnail and job.thumbnail_url:
-            try:
-                from .thumbnail_service import save_thumbnail_to_dir
-                await asyncio.to_thread(
-                    save_thumbnail_to_dir, job.thumbnail_url, job.path, job.title or "thumbnail"
-                )
-            except Exception as e:
-                logger.warning(f"[WebUI] save thumbnail failed: {e}")
 
         job._subtitle_files_before = _snapshot_subtitle_files(job.path)
 
@@ -603,6 +598,18 @@ class DownloadManager:
             job.status = "completed"
             job.progress = 100.0
             self._find_final_file(job)
+            # Save thumbnail into the per-video folder (official: ytsage_gui_main.py L894-901)
+            if job.save_thumbnail and job.thumbnail_url and job.last_file_path:
+                try:
+                    from .thumbnail_service import save_thumbnail_to_dir
+                    await asyncio.to_thread(
+                        save_thumbnail_to_dir,
+                        job.thumbnail_url,
+                        str(Path(job.last_file_path).parent),
+                        job.title or "thumbnail",
+                    )
+                except Exception as e:
+                    logger.warning(f"[WebUI] save thumbnail failed: {e}")
             if job.merge_subs and job.subtitle_langs:
                 await asyncio.to_thread(cleanup_merged_subtitle_files, job.path, job._subtitle_files_before)
             await self._write_history(job)
@@ -660,8 +667,7 @@ class DownloadManager:
             path = Path(job.path)
             candidates: List[Path] = []
             for ext in MEDIA_EXTENSIONS:
-                candidates.extend(path.glob(f"*{ext}"))
-                candidates.extend(path.glob(f"*/*{ext}"))
+                candidates.extend(path.rglob(f"*{ext}"))
             if candidates:
                 most_recent = max(candidates, key=lambda p: p.stat().st_mtime)
                 if time.time() - most_recent.stat().st_mtime < 120:

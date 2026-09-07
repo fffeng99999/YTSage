@@ -72,15 +72,17 @@ def sanitize_filename(name: str) -> str:
 
 
 def save_thumbnail_to_dir(thumbnail_url: str, download_path: str, title: str) -> Optional[Path]:
-    """Save thumbnail to <download_path>/Thumbnails/<sanitized title>.jpg.
+    """Save thumbnail as <download_path>/<sanitized title>.jpg.
 
-    Official: ytsage_gui_video_info.py L426-469.
+    download_path is the per-video folder created by yt-dlp (the parent of
+    the downloaded media file), so all files related to one video stay
+    together in the same folder.
     """
     try:
         src = fetch_thumbnail(thumbnail_url) if thumbnail_url else None
         if not src:
             return None
-        thumb_dir = Path(download_path) / "Thumbnails"
+        thumb_dir = Path(download_path)
         thumb_dir.mkdir(parents=True, exist_ok=True)
         dest = thumb_dir / f"{sanitize_filename(title or 'thumbnail')}.jpg"
         dest.write_bytes(src.read_bytes())
