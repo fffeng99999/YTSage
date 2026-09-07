@@ -15,9 +15,9 @@
                 <el-option label="MB/s" :value="1" />
               </el-select>
             </el-form-item>
-            <el-form-item :label="t('settings.concurrent_fragments')">
-              <el-tooltip :content="t('settings.concurrent_fragments_help')" placement="top">
-                <el-input-number v-model="form.concurrent_fragments" :min="1" :max="20" />
+            <el-form-item :label="t('web.concurrent_downloads')">
+              <el-tooltip :content="t('web.concurrent_downloads_help')" placement="top">
+                <el-input-number v-model="form.max_concurrent_downloads" :min="1" :max="10" />
               </el-tooltip>
             </el-form-item>
             <el-form-item :label="t('settings.generic_mode')">

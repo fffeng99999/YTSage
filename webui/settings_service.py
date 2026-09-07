@@ -106,7 +106,9 @@ SETTINGS_SCHEMA: Dict[str, Any] = {
     "check_app_updates": (_BOOL, True),
     "check_beta_updates": (_BOOL, False),
     "last_update_check": (lambda v: float(v or 0), 0),
-    "concurrent_fragments": (_int_range(1, 20), 1),
+    # Global cap on how many download jobs run at the same time (server-side
+    # queue). Replaces the old per-page batch concurrency selector.
+    "max_concurrent_downloads": (_int_range(1, 10), 1),
     "play_notification_sound": (_BOOL, True),
     "language": (_in_choices("en", "zh"), "en"),
     "ytdlp_channel": (_in_choices("stable", "nightly"), "stable"),
@@ -218,7 +220,6 @@ def build_download_defaults() -> Dict[str, Any]:
         "cookie_file": cookies["cookie_file"],
         "browser_cookies": cookies["browser_cookies"],
         "filename_format": cfg_get("filename_format"),
-        "concurrent_fragments": cfg_get("concurrent_fragments") or 1,
         "force_output_format": bool(cfg_get("force_output_format")),
         "preferred_output_format": cfg_get("preferred_output_format") or "mp4",
         "force_audio_format": bool(cfg_get("force_audio_format")),

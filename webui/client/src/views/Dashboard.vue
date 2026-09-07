@@ -43,7 +43,7 @@
         <el-button v-if="currentJob && currentJob.status === 'paused'" size="large" type="warning" @click="resumeJob">
           {{ t('buttons.resume') }}
         </el-button>
-        <el-button v-if="currentJob && ['running', 'paused'].includes(currentJob.status)" size="large" @click="cancelJob">
+        <el-button v-if="currentJob && ['running', 'paused', 'queued', 'pending'].includes(currentJob.status)" size="large" @click="cancelJob">
           {{ t('buttons.cancel') }}
         </el-button>
         <el-button v-if="currentJob && currentJob.status === 'completed' && currentJob.last_file_path" size="large" @click="reveal(currentJob.last_file_path)">
@@ -207,7 +207,7 @@ const currentJob = computed(() =>
   downloadStore.jobs.find((j) => j.job_id === currentJobId.value)
 )
 const downloading = computed(() =>
-  currentJob.value && ['running', 'paused', 'pending'].includes(currentJob.value.status)
+  currentJob.value && ['running', 'paused', 'pending', 'queued'].includes(currentJob.value.status)
 )
 const canDownload = computed(() =>
   !!url.value.trim() && !!downloadPath.value && !analyzing.value && !downloading.value
@@ -227,6 +227,7 @@ const statusText = computed(() => {
   switch (j.status) {
     case 'paused': return t('download.paused')
     case 'cancelled': return t('download.cancelled')
+    case 'queued': return t('web.batch.queued')
     case 'completed':
       if (j.file_exists) return t('status.file_exists')
       return j.is_audio_only ? t('download.audio_completed') : t('download.video_completed')

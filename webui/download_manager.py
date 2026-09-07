@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .event_bus import bus, throttled
+from .official_bridge import cfg_get
 from .yt_dlp_finder import get_yt_dlp_path
 
 # Safe imports: these have NO PySide6 dependency
@@ -400,11 +401,42 @@ class DownloadManager:
 
     def __init__(self) -> None:
         self._jobs: Dict[str, DownloadJob] = {}
+        # FIFO of job_ids waiting for a free slot in the global concurrency
+        # cap (max_concurrent_downloads setting).
+        self._queue: List[str] = []
+
+    # -- concurrency scheduling ---------------------------------------------
+
+    @staticmethod
+    def _max_concurrent() -> int:
+        try:
+            n = int(cfg_get("max_concurrent_downloads") or 1)
+        except (TypeError, ValueError):
+            n = 1
+        return max(1, min(10, n))
+
+    def _running_count(self) -> int:
+        # 'pending' covers jobs whose task was just launched by _pump but has
+        # not flipped to 'running' yet, so slots are reserved immediately.
+        # Paused jobs keep their yt-dlp process alive (cooperative pause),
+        # so they still occupy a concurrency slot.
+        return sum(1 for j in self._jobs.values() if j.status in ("pending", "running", "paused"))
+
+    def _pump(self) -> None:
+        """Start queued jobs while slots are free."""
+        limit = self._max_concurrent()
+        while self._queue and self._running_count() < limit:
+            job_id = self._queue.pop(0)
+            job = self._jobs.get(job_id)
+            if not job or job.status != "queued":
+                continue
+            job.status = "pending"
+            asyncio.create_task(self._run_download(job))
 
     # -- introspection ------------------------------------------------------
 
     def active_count(self) -> int:
-        return sum(1 for j in self._jobs.values() if j.status in ("pending", "running", "paused"))
+        return sum(1 for j in self._jobs.values() if j.status in ("queued", "pending", "running", "paused"))
 
     def is_updating_blocked(self) -> bool:
         return self.active_count() > 0
@@ -444,7 +476,11 @@ class DownloadManager:
     # -- lifecycle ----------------------------------------------------------
 
     async def start_download(self, job_data: Dict[str, Any]) -> str:
-        """Create and start a new download job. Returns job_id."""
+        """Create a new download job and enqueue it. Returns job_id.
+
+        The job starts immediately when a slot is free under the global
+        max_concurrent_downloads cap, otherwise it waits with status 'queued'.
+        """
         job_id = uuid.uuid4().hex[:12]
         path = Path(job_data.get("path") or Path.home() / "Downloads")
         path.mkdir(parents=True, exist_ok=True)
@@ -452,12 +488,14 @@ class DownloadManager:
         job_data["job_id"] = job_id
 
         job = DownloadJob(**{k: v for k, v in job_data.items() if k in DownloadJob.__dataclass_fields__})
+        job.status = "queued"
         self._jobs[job_id] = job
+        self._queue.append(job_id)
 
         job._subtitle_files_before = _snapshot_subtitle_files(job.path)
 
-        asyncio.create_task(self._run_download(job))
         bus.publish({"type": "job_created", "job": self._job_to_dict(job)})
+        self._pump()
         return job_id
 
     async def cancel(self, job_id: str) -> bool:
@@ -466,6 +504,18 @@ class DownloadManager:
             return False
         job._cancelled = True
         job._paused = False
+        if job_id in self._queue:
+            # Never started: drop it from the queue and finish it here.
+            self._queue.remove(job_id)
+            job.status = "cancelled"
+            throttled.flush(job_id, {"type": "job_update", "job": self._job_to_dict(job)})
+            bus.publish({
+                "type": "job_finished",
+                "job": self._job_to_dict(job),
+                "success": False,
+            })
+            throttled.cleanup(job_id)
+            return True
         if job._process and job._process.returncode is None:
             await self._terminate_process_tree(job._process)
             await asyncio.to_thread(cleanup_partial_files, job.path)
@@ -496,11 +546,14 @@ class DownloadManager:
         if not job:
             return False
         # Kill first if still active (prevents orphan processes)
-        if job.status in ("pending", "running", "paused"):
+        if job.status in ("queued", "pending", "running", "paused"):
             await self.cancel(job_id)
+        if job_id in self._queue:
+            self._queue.remove(job_id)
         throttled.cleanup(job_id)
         del self._jobs[job_id]
         bus.publish({"type": "job_removed", "job_id": job_id})
+        self._pump()
         return True
 
     @staticmethod
@@ -535,6 +588,9 @@ class DownloadManager:
     # -- execution ----------------------------------------------------------
 
     async def _run_download(self, job: DownloadJob) -> None:
+        if job._cancelled:
+            throttled.cleanup(job.job_id)
+            return
         job.status = "running"
         cmd = build_ytdlp_command(job)
         cmd_str = " ".join(shlex.quote(a) for a in cmd)
@@ -625,6 +681,8 @@ class DownloadManager:
             "success": job.status == "completed",
         })
         throttled.cleanup(job.job_id)
+        # Slot released: start the next queued job, if any.
+        self._pump()
 
     async def _write_history(self, job: DownloadJob) -> None:
         """Official: download_finished -> HistoryManager.add_entry (main.py L1004-1042)."""

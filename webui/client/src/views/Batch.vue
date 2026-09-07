@@ -9,10 +9,6 @@
         <el-select v-model="qualityIdx" style="width: 190px">
           <el-option v-for="(q, i) in qualityOptions" :key="q.key" :label="q.label" :value="i" />
         </el-select>
-        <span class="lbl">{{ t('web.batch.concurrency') }}</span>
-        <el-select v-model="concurrency" style="width: 90px">
-          <el-option v-for="n in [1, 2, 3, 5]" :key="n" :label="n" :value="n" />
-        </el-select>
       </div>
       <div class="action-row">
         <el-checkbox v-model="optMergeSubs">{{ t('main_ui.merge_subtitles') }}</el-checkbox>
@@ -97,7 +93,9 @@
               <template #default="{ row }">
                 <el-tag v-if="!row.ok" size="small" type="danger">{{ trErr(row.error_key, row.error_params) }}</el-tag>
                 <el-tag v-else-if="row.dl_status === 'queued'" size="small" type="info">{{ t('web.batch.queued') }}</el-tag>
+                <el-tag v-else-if="row.dl_status === 'pending'" size="small" type="info">{{ t('download.starting') }}</el-tag>
                 <el-tag v-else-if="row.dl_status === 'running'" size="small">{{ t('download.downloading') }}</el-tag>
+                <el-tag v-else-if="row.dl_status === 'paused'" size="small" type="warning">{{ t('download.paused') }}</el-tag>
                 <el-tag v-else-if="row.dl_status === 'completed'" size="small" type="success">{{ t('download.completed') }}</el-tag>
                 <el-tag v-else-if="row.dl_status === 'error'" size="small" type="danger">{{ t('web.batch.failed') }}</el-tag>
                 <el-tag v-else-if="row.dl_status === 'cancelled'" size="small" type="info">{{ t('download.cancelled') }}</el-tag>
@@ -200,7 +198,9 @@
             <el-table-column :label="t('web.batch.col_status')" width="150">
               <template #default="{ row }">
                 <el-tag v-if="row.dl_status === 'queued'" size="small" type="info">{{ t('web.batch.queued') }}</el-tag>
+                <el-tag v-else-if="row.dl_status === 'pending'" size="small" type="info">{{ t('download.starting') }}</el-tag>
                 <el-tag v-else-if="row.dl_status === 'running'" size="small">{{ t('download.downloading') }}</el-tag>
+                <el-tag v-else-if="row.dl_status === 'paused'" size="small" type="warning">{{ t('download.paused') }}</el-tag>
                 <el-tag v-else-if="row.dl_status === 'completed'" size="small" type="success">{{ t('download.completed') }}</el-tag>
                 <el-tag v-else-if="row.dl_status === 'error'" size="small" type="danger">{{ t('web.batch.failed') }}</el-tag>
                 <el-tag v-else-if="row.dl_status === 'cancelled'" size="small" type="info">{{ t('download.cancelled') }}</el-tag>
@@ -257,7 +257,6 @@ const settingsStore = useSettingsStore()
 
 const activeTab = ref('batch')
 const downloadPath = ref('')
-const concurrency = ref(2)
 
 // Download options shared by both tabs (same semantics as the Dashboard):
 // when a video has no subtitles/thumbnail/description, yt-dlp just skips it.
@@ -371,64 +370,71 @@ function codecLabel(pick) {
 }
 
 /* --------------------------------------------------------------------------
- * Shared concurrency pump (used by both tabs)
+ * Download submitter (used by both tabs).
+ * All selected rows are submitted at once; the backend enforces the global
+ * max_concurrent_downloads cap, so rows show 'queued' until their turn.
  * ------------------------------------------------------------------------ */
 function createPump(onAllDone) {
   const state = reactive({ pumping: false, done: 0, total: 0 })
   let jobRowMap = new Map()
-  let running = new Set()
-  let queue = []
+  // Fallback for the WS job_created event racing ahead of the HTTP response:
+  // rows not yet bound to a job_id, keyed by url.
+  let unmatchedRows = []
 
-  function pump() {
-    while (running.size < concurrency.value && queue.length) {
-      const row = queue.shift()
+  function start(rows) {
+    jobRowMap = new Map()
+    unmatchedRows = rows.slice()
+    state.total = rows.length
+    state.done = 0
+    state.pumping = true
+    for (const row of rows) {
       row.dl_status = 'queued'
       startDownload(row.payload)
         .then(({ job_id }) => {
-          jobRowMap.set(job_id, row)
-          running.add(job_id)
-          row.dl_status = 'running'
+          if (!jobRowMap.has(job_id)) {
+            jobRowMap.set(job_id, row)
+            const i = unmatchedRows.indexOf(row)
+            if (i >= 0) unmatchedRows.splice(i, 1)
+          }
         })
         .catch((e) => {
           row.dl_status = 'error'
           state.done++
+          const i = unmatchedRows.indexOf(row)
+          if (i >= 0) unmatchedRows.splice(i, 1)
           ElMessage.error(`${row.title || row.payload.url}: ${errText(e)}`)
           checkDone()
         })
     }
-    checkDone()
   }
 
   function checkDone() {
     if (!state.pumping) return
-    if (!queue.length && !running.size) {
+    if (state.done >= state.total) {
       state.pumping = false
       onAllDone(state.done)
     }
   }
 
-  function start(rows) {
-    queue = rows.slice()
-    state.total = queue.length
-    state.done = 0
-    jobRowMap = new Map()
-    running = new Set()
-    state.pumping = true
-    pump()
-  }
-
   function onJobsChanged(jobs) {
-    for (const [jobId, row] of [...jobRowMap]) {
-      const job = jobs.find((j) => j.job_id === jobId)
-      if (!job) continue
+    for (const job of jobs) {
+      let row = jobRowMap.get(job.job_id)
+      if (!row) {
+        // job_created arrived before the startDownload promise resolved
+        row = unmatchedRows.find((r) => r.payload.url === job.url)
+        if (row) {
+          jobRowMap.set(job.job_id, row)
+          unmatchedRows.splice(unmatchedRows.indexOf(row), 1)
+        }
+      }
+      if (!row) continue
+      row.dl_status = job.status
       if (['completed', 'error', 'cancelled'].includes(job.status)) {
-        row.dl_status = job.status
-        jobRowMap.delete(jobId)
-        running.delete(jobId)
+        jobRowMap.delete(job.job_id)
         state.done++
-        pump()
       }
     }
+    checkDone()
   }
 
   return { state, start, onJobsChanged }

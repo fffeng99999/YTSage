@@ -289,7 +289,7 @@ async def start_download(req: DownloadRequest, auth: dict = Depends(get_current_
         if data.get(key) in (None, ""):
             data[key] = defaults[key]
     for key in ("force_output_format", "preferred_output_format", "force_audio_format",
-                "preferred_audio_format", "audio_normalization", "concurrent_fragments"):
+                "preferred_audio_format", "audio_normalization"):
         if data.get(key) is None:
             data[key] = defaults[key]
     try:

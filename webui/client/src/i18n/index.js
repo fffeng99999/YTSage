@@ -109,6 +109,8 @@ const WEB_EXTRA = {
         '1080': '≤ 1920x1080', '720': '≤ 1280x720', '480': '≤ 854x480',
         '360': '≤ 640x360', '240': '≤ 426x240', '144': '≤ 256x144', worst: 'Worst Available',
       },
+      concurrent_downloads: 'Simultaneous Downloads',
+      concurrent_downloads_help: 'How many download tasks may run at the same time across all pages (single, batch and channel). Extra tasks wait in a queue until a slot frees up. Default: 1.',
       channel_err: {
         watch_url: "This is a video URL. Please paste the channel homepage URL (e.g. youtube.com/{'@'}handle).",
         playlist_url: 'This is a playlist URL. Use the single-download page instead.',
@@ -246,6 +248,8 @@ const WEB_EXTRA = {
         '1080': '≤ 1920x1080', '720': '≤ 1280x720', '480': '≤ 854x480',
         '360': '≤ 640x360', '240': '≤ 426x240', '144': '≤ 256x144', worst: '最低画质',
       },
+      concurrent_downloads: '并发下载数',
+      concurrent_downloads_help: '所有页面（单个、批量、频道下载）允许同时进行的下载任务数量，超出的任务自动排队等待空闲名额。默认值：1。',
       channel_err: {
         watch_url: "这是视频链接,请粘贴博主主页链接(例如 youtube.com/{'@'}handle)。",
         playlist_url: '这是播放列表链接,请使用单链接下载页面。',

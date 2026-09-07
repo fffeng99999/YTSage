@@ -25,9 +25,9 @@
       <div class="job-ops">
         <el-button v-if="j.status === 'running'" size="small" @click="pause(j)">{{ t('buttons.pause') }}</el-button>
         <el-button v-if="j.status === 'paused'" size="small" type="warning" @click="resume(j)">{{ t('buttons.resume') }}</el-button>
-        <el-button v-if="['running','paused','pending'].includes(j.status)" size="small" type="danger" @click="cancel(j)">{{ t('buttons.cancel') }}</el-button>
+        <el-button v-if="['running','paused','pending','queued'].includes(j.status)" size="small" type="danger" @click="cancel(j)">{{ t('buttons.cancel') }}</el-button>
         <el-button v-if="j.status === 'completed' && j.last_file_path" size="small" @click="reveal(j.last_file_path)">📁</el-button>
-        <el-button v-if="!['running','pending'].includes(j.status)" size="small" text @click="remove(j)">{{ t('history.remove') }}</el-button>
+        <el-button v-if="!['running','pending','queued'].includes(j.status)" size="small" text @click="remove(j)">{{ t('history.remove') }}</el-button>
       </div>
     </div>
   </div>
@@ -58,13 +58,14 @@ const filtered = computed(() => {
 })
 
 function statusTag(s) {
-  return { completed: 'success', error: 'danger', cancelled: 'info', paused: 'warning', running: 'primary' }[s] || 'info'
+  return { completed: 'success', error: 'danger', cancelled: 'info', paused: 'warning', running: 'primary', queued: 'info' }[s] || 'info'
 }
 function statusLabel(s) {
   return {
     running: t('download.downloading'), paused: t('download.paused'),
     completed: t('download.completed'), cancelled: t('download.cancelled'),
     error: t('main_ui.error_title'), pending: t('download.starting'),
+    queued: t('web.batch.queued'),
   }[s] || s
 }
 function progStatus(s) {
