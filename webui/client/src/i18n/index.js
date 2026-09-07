@@ -63,6 +63,17 @@ const WEB_EXTRA = {
         update_button: 'Update FFmpeg',
         update_success: 'FFmpeg updated successfully',
       },
+      rollback: {
+        button: 'Roll Back',
+        to: 'Roll back to {version}',
+        confirm_title: 'Roll back version',
+        confirm_message: 'Restore the previously installed version {version}? This replaces the current installation with the copy archived on this machine.',
+        busy: 'Rolling back…',
+        success: 'Rolled back to {version}',
+        failed: 'Rollback failed: {error}',
+        no_history: 'No previous installed version is archived for this component yet. A rollback becomes available after the first update performed here.',
+        hint: 'Rolls back to the previous version installed on this machine (not the previous upstream release).',
+      },
       errors: {
         postprocessing_failed: "The download finished but post-processing failed (merging / subtitle embedding / SponsorBlock chapter editing). The link is fine - try again with SponsorBlock or 'merge subtitles' turned off, or pick a different quality. Details: {error}",
       },
@@ -188,6 +199,17 @@ const WEB_EXTRA = {
       ffmpeg: {
         update_button: '更新 FFmpeg',
         update_success: 'FFmpeg 更新成功',
+      },
+      rollback: {
+        button: '回退版本',
+        to: '回退到 {version}',
+        confirm_title: '版本回退',
+        confirm_message: '确定恢复到上一个安装的版本 {version} 吗？将用本机归档的旧版本覆盖当前安装。',
+        busy: '正在回退…',
+        success: '已回退到 {version}',
+        failed: '回退失败：{error}',
+        no_history: '该组件还没有已归档的上一个安装版本。在本页面完成第一次更新后即可回退。',
+        hint: '回退到本机上一个安装的版本（不是上游的上一个发布版本）。',
       },
       errors: {
         postprocessing_failed: "视频已下载完成，但后处理失败（合并、内嵌字幕或 SponsorBlock 章节编辑）。链接本身没有问题——请尝试关闭 SponsorBlock 或“合并字幕”后重试，或换一种画质。详情：{error}",

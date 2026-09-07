@@ -10,6 +10,9 @@ export function checkYtdlp() {
 export function updateYtdlp() {
   return api.post('/updater/ytdlp/update', null, { timeout: 300000 }).then((r) => r.data)
 }
+export function rollbackYtdlp() {
+  return api.post('/updater/ytdlp/rollback', null, { timeout: 120000 }).then((r) => r.data)
+}
 export function setYtdlpChannel(channel) {
   return api.post('/updater/ytdlp/channel', { channel }, { timeout: 200000 }).then((r) => r.data)
 }
@@ -22,11 +25,17 @@ export function checkFfmpeg() {
 export function installFfmpeg() {
   return api.post('/updater/ffmpeg/install', null, { timeout: 600000 }).then((r) => r.data)
 }
+export function rollbackFfmpeg() {
+  return api.post('/updater/ffmpeg/rollback', null, { timeout: 120000 }).then((r) => r.data)
+}
 export function checkDeno() {
   return api.post('/updater/deno/check').then((r) => r.data)
 }
 export function updateDeno() {
   return api.post('/updater/deno/update', null, { timeout: 600000 }).then((r) => r.data)
+}
+export function rollbackDeno() {
+  return api.post('/updater/deno/rollback', null, { timeout: 600000 }).then((r) => r.data)
 }
 export function checkApp() {
   return api.post('/updater/app/check').then((r) => r.data)

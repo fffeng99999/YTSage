@@ -17,11 +17,15 @@ analyze/download (409) while updating; active downloads block binary updates.
 """
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -32,7 +36,10 @@ from packaging import version as _pkg_version
 from .event_bus import bus
 from .official_bridge import (
     APP_BIN_DIR,
+    APP_DATA_DIR,
     DENO_APP_BIN_PATH,
+    DENO_DOWNLOAD_URL,
+    DENO_SHA256_URL,
     FFMPEG_ZIP_DOWNLOAD_URL,
     HAS_FFMPEG_CORE,
     OS_NAME,
@@ -85,6 +92,162 @@ def _busy_guard() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Version history (rollback support)
+#
+# Semantics requested by the user: "rollback" restores the PREVIOUS INSTALLED
+# version on this machine - the payload that was actually in place before the
+# last update - NOT the previous upstream release. Every update therefore
+# archives the payload it replaces (single-file binaries are copied into the
+# history dir; ffmpeg build dirs are recorded in place since the installer
+# keeps them on disk). The `previous` list behaves like a stack: the newest
+# archived version is always the last element, which is exactly the one the
+# user wants to go back to, even when the version gap spans many releases.
+# ---------------------------------------------------------------------------
+
+HISTORY_ROOT = Path(APP_DATA_DIR) / "update_history"
+_MAX_PREVIOUS = 5
+_history_lock = threading.Lock()
+
+
+def _manifest_path() -> Path:
+    return HISTORY_ROOT / "manifest.json"
+
+
+def _load_manifest() -> Dict[str, Any]:
+    try:
+        if _manifest_path().exists():
+            return json.loads(_manifest_path().read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning(f"[WebUI] update_history manifest read failed: {e}")
+    return {}
+
+
+def _save_manifest(data: Dict[str, Any]) -> None:
+    try:
+        HISTORY_ROOT.mkdir(parents=True, exist_ok=True)
+        _manifest_path().write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"[WebUI] update_history manifest write failed: {e}")
+
+
+def _prune_previous(component: str, previous: list) -> list:
+    """Keep the newest _MAX_PREVIOUS archives; drop older ones (and their files)."""
+    if len(previous) <= _MAX_PREVIOUS:
+        return previous
+    for gone in previous[:-_MAX_PREVIOUS]:
+        f = gone.get("file")
+        if f:
+            try:
+                Path(f).unlink(missing_ok=True)
+            except Exception:
+                pass
+    return previous[-_MAX_PREVIOUS:]
+
+
+def record_install(component: str, version: str, extra: Optional[Dict[str, Any]] = None) -> None:
+    """Record the version that is now active (after a successful update/install)."""
+    with _history_lock:
+        data = _load_manifest()
+        hist = data.setdefault(component, {"current": None, "previous": []})
+        cur = {"version": version, "ts": int(time.time())}
+        if extra:
+            cur.update(extra)
+        hist["current"] = cur
+        _save_manifest(data)
+
+
+def archive_payload(component: str, version: str, src: Path, kind: str = "file") -> bool:
+    """Preserve the payload about to be replaced so rollback can restore it.
+
+    kind="file": copy the binary into the history dir.
+    kind="dir":  record the on-disk directory path in place (ffmpeg builds).
+    Returns True when the entry was archived.
+    """
+    entry: Dict[str, Any] = {"version": version, "ts": int(time.time())}
+    try:
+        if kind == "dir":
+            entry["dir"] = str(src)
+        else:
+            dest_dir = HISTORY_ROOT / component
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            safe = re.sub(r"[^\w.\-]+", "_", version or "unknown")
+            dest = dest_dir / f"{safe}-{entry['ts']}{src.suffix or '.bin'}"
+            shutil.copy2(src, dest)
+            entry["file"] = str(dest)
+    except Exception as e:
+        logger.warning(f"[WebUI] failed to archive {component} {version}: {e}")
+        return False
+    with _history_lock:
+        data = _load_manifest()
+        hist = data.setdefault(component, {"current": None, "previous": []})
+        hist["previous"].append(entry)
+        hist["previous"] = _prune_previous(component, hist["previous"])
+        _save_manifest(data)
+    return True
+
+
+def history_summary(component: str) -> Dict[str, Any]:
+    """Rollback info for one component (newest archived version first)."""
+    data = _load_manifest()
+    hist = data.get(component) or {}
+    prev = hist.get("previous") or []
+    cur = hist.get("current") or {}
+    return {
+        "current": cur.get("version"),
+        "rollback_available": bool(prev),
+        "rollback_to": prev[-1].get("version") if prev else None,
+        "rollback_to_ts": prev[-1].get("ts") if prev else None,
+        "previous": [{"version": p.get("version"), "ts": p.get("ts")} for p in reversed(prev)],
+    }
+
+
+def _pop_previous(component: str) -> Optional[Dict[str, Any]]:
+    """Atomically take the newest archived entry for rollback (None if empty)."""
+    with _history_lock:
+        data = _load_manifest()
+        hist = data.get(component) or {}
+        prev = hist.get("previous") or []
+        if not prev:
+            return None
+        entry = prev.pop()
+        hist["previous"] = prev
+        _save_manifest(data)
+        return entry
+
+
+def _sha256_of(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _verify_sha256_url(file_path: Path, sha_url: str, say=None) -> bool:
+    """Verify a downloaded file against its published .sha256sum(.txt) URL.
+
+    Mirrors the ffmpeg flow: a verification problem is reported but does not
+    abort the update (network mirrors sometimes lag the checksum endpoint).
+    """
+    def msg(s):
+        if say:
+            say(s)
+    try:
+        resp = requests.get(sha_url, timeout=15)
+        resp.raise_for_status()
+        expected = resp.text.strip().split()[0].lower()
+        msg("🔐 Verifying download integrity...")
+        actual = _sha256_of(file_path)
+        if expected == actual:
+            return True
+        msg("⚠️ SHA-256 verification failed, proceeding anyway...")
+        return False
+    except Exception as e:
+        logger.warning(f"[WebUI] sha256 check failed ({sha_url}): {e}")
+        return False
+
+
+# ---------------------------------------------------------------------------
 # yt-dlp
 # ---------------------------------------------------------------------------
 
@@ -118,7 +281,8 @@ def ytdlp_check() -> Dict[str, Any]:
         available = bool(latest) and _pkg_version.parse(latest.replace("_", ".")) > _pkg_version.parse(current.replace("_", "."))
     except Exception:
         available = bool(latest) and latest != current
-    return {"current": current, "latest": latest or "Unknown", "update_available": available}
+    return {"current": current, "latest": latest or "Unknown", "update_available": available,
+            "history": history_summary("ytdlp")}
 
 
 async def ytdlp_check_async() -> Dict[str, Any]:
@@ -129,6 +293,8 @@ def ytdlp_update_sync(progress_cb=None) -> bool:
     """Official: ytsage_utils.update_yt_dlp (L432) + YTDLPUpdateDialog UpdateThread.
 
     App-managed binary -> direct download+replace; otherwise `yt-dlp -U`.
+    The binary being replaced is archived first so the user can roll back to
+    the previous *installed* version.
     """
     global updating_ytdlp
     _busy_guard()
@@ -142,6 +308,8 @@ def ytdlp_update_sync(progress_cb=None) -> bool:
                 is_app_managed = True
         except OSError:
             is_app_managed = False
+
+        old_version = ytdlp_current_version()
 
         if progress_cb:
             progress_cb(20)
@@ -160,15 +328,21 @@ def ytdlp_update_sync(progress_cb=None) -> bool:
                 progress_cb(90)
             if OS_NAME != "Windows":
                 os.chmod(temp, 0o755)
+            # Preserve the outgoing binary for rollback before overwriting it.
+            if path.exists() and old_version and not old_version.startswith(("Error", "Not found")):
+                archive_payload("ytdlp", old_version, path)
             if OS_NAME == "Windows" and path.exists():
                 path.unlink(missing_ok=True)
             Path(temp).rename(path)
+            record_install("ytdlp", ytdlp_current_version())
             if progress_cb:
                 progress_cb(100)
             return True
         else:
             # Fallback: yt-dlp self-update
             r = _run([str(path), "-U"], timeout=300)
+            if r.returncode == 0:
+                record_install("ytdlp", ytdlp_current_version())
             if progress_cb:
                 progress_cb(100)
             if OS_NAME != "Windows":
@@ -197,6 +371,68 @@ async def ytdlp_update_async() -> Dict[str, Any]:
         ok = await asyncio.to_thread(ytdlp_update_sync, cb)
         _emit("ytdlp", state="done" if ok else "failed", progress=100 if ok else None)
         return {"success": ok}
+    finally:
+        updating_ytdlp = False
+
+
+def ytdlp_rollback_sync(progress_cb=None) -> Dict[str, Any]:
+    """Restore the previously installed yt-dlp binary (not upstream's prev release)."""
+    global updating_ytdlp
+    _busy_guard()
+    path = Path(get_yt_dlp_path())
+
+    def say(msg):
+        if progress_cb:
+            progress_cb(str(msg))
+
+    entry = _pop_previous("ytdlp")
+    if not entry:
+        return {"success": False, "error": "no_history"}
+    src = Path(entry.get("file") or "")
+    if not src.exists():
+        say(f"❌ Archived binary missing: {src}")
+        return {"success": False, "error": "archive_missing", "version": entry.get("version")}
+
+    say(f"↩ Restoring yt-dlp {entry.get('version')}...")
+    # Keep the version we are rolling away from available to roll forward again.
+    current_version = ytdlp_current_version()
+    if path.exists() and current_version and not current_version.startswith(("Error", "Not found")):
+        archive_payload("ytdlp", current_version, path)
+    try:
+        if OS_NAME == "Windows" and path.exists():
+            path.unlink(missing_ok=True)
+        shutil.copy2(src, path)
+        if OS_NAME != "Windows":
+            os.chmod(path, 0o755)
+    except Exception as e:
+        say(f"❌ Rollback failed: {e}")
+        return {"success": False, "error": str(e)}
+
+    r = _run([str(path), "--version"], timeout=15)
+    if r.returncode != 0:
+        say("❌ Rollback verification failed")
+        return {"success": False, "error": "verify_failed"}
+    record_install("ytdlp", entry.get("version") or "")
+    say("✅ Rollback complete")
+    return {"success": True, "version": entry.get("version")}
+
+
+async def ytdlp_rollback_async() -> Dict[str, Any]:
+    global updating_ytdlp
+    if updating_ytdlp:
+        raise RuntimeError("already_updating")
+    updating_ytdlp = True
+    _emit("ytdlp", state="rolling_back", message="start")
+    loop = asyncio.get_running_loop()
+
+    def cb(msg):
+        loop.call_soon_threadsafe(_emit, "ytdlp", state="rolling_back", message=msg)
+
+    try:
+        result = await asyncio.to_thread(ytdlp_rollback_sync, cb)
+        _emit("ytdlp", state="rolled_back" if result.get("success") else "failed" if result.get("success") else "failed",
+              message=result.get("version") or result.get("error"))
+        return result
     finally:
         updating_ytdlp = False
 
@@ -354,6 +590,17 @@ def _ffmpeg_pick_latest_bin(extract_dir: Path) -> Optional[Path]:
     return best
 
 
+def _ffmpeg_current_bin_dir() -> Optional[Path]:
+    """Bin directory of the ffmpeg currently resolved on PATH (None if absent)."""
+    exe = shutil.which("ffmpeg")
+    if not exe:
+        return None
+    try:
+        return Path(exe).resolve().parent
+    except Exception:
+        return Path(exe).parent
+
+
 def _ffmpeg_persist_path_windows(bin_dir: Path) -> None:
     """Persist the new ffmpeg bin on the USER PATH (registry), NOT via setx.
 
@@ -419,6 +666,11 @@ def ffmpeg_update_sync(progress_cb=None) -> bool:
         extract_dir = Path(os.getenv("LOCALAPPDATA")) / "ffmpeg"
         extract_dir.mkdir(exist_ok=True)
 
+        # Remember what is installed right now so a later rollback can restore
+        # the *previous installed* build (its dir stays on disk untouched).
+        prev_bin = _ffmpeg_current_bin_dir()
+        prev_version = ffmpeg_current_version()
+
         say("⬇ Downloading FFmpeg update (zip)...")
         temp = tempfile.NamedTemporaryFile(delete=False, suffix=".zip").name
         try:
@@ -469,12 +721,73 @@ def ffmpeg_update_sync(progress_cb=None) -> bool:
         say("✅ Verifying update...")
         r = _run([str(bin_dir / "ffmpeg.exe"), "-version"], timeout=15)
         ok = r.returncode == 0
+        if ok:
+            new_version = (r.stdout or "").split("\n")[0]
+            m = re.search(r"version\s+(\S+)", new_version)
+            record_install("ffmpeg", m.group(1) if m else new_version, {"bin_dir": str(bin_dir)})
+            # Archive the build we just replaced (its dir stays on disk, so
+            # rollback only needs to repoint PATH at it again).
+            if prev_bin and prev_version and not prev_version.startswith(("Error", "Not found")) \
+                    and prev_bin.resolve() != bin_dir.resolve():
+                archive_payload("ffmpeg", prev_version, prev_bin, kind="dir")
         say("✅ FFmpeg update completed!" if ok else "❌ FFmpeg update verification failed")
         return ok
     except Exception as e:
         logger.error(f"[WebUI] ffmpeg update failed: {e}")
         say(f"❌ FFmpeg update failed: {e}")
         return False
+
+
+def ffmpeg_rollback_sync(progress_cb=None) -> Dict[str, Any]:
+    """Roll FFmpeg back to the previously installed build (not upstream's prev)."""
+    _busy_guard()
+    if OS_NAME != "Windows":
+        return {"success": False, "error": "rollback_windows_only"}
+
+    def say(msg):
+        if progress_cb:
+            progress_cb(str(msg))
+
+    entry = _pop_previous("ffmpeg")
+    if not entry:
+        return {"success": False, "error": "no_history"}
+    bin_dir = Path(entry.get("dir") or "")
+    exe = bin_dir / "ffmpeg.exe"
+    if not exe.exists():
+        say(f"❌ Archived build missing: {bin_dir}")
+        return {"success": False, "error": "archive_missing", "version": entry.get("version")}
+
+    say(f"↩ Restoring FFmpeg {entry.get('version')}...")
+    _ffmpeg_persist_path_windows(bin_dir)
+    parts = os.environ.get("PATH", "").split(os.pathsep)
+    cleaned = [p for p in parts if "ffmpeg" not in p.lower()]
+    cleaned.insert(0, str(bin_dir))
+    os.environ["PATH"] = os.pathsep.join(cleaned)
+
+    r = _run([str(exe), "-version"], timeout=15)
+    if r.returncode != 0:
+        say("❌ Rollback verification failed")
+        return {"success": False, "error": "verify_failed"}
+    record_install("ffmpeg", entry.get("version") or "", {"bin_dir": str(bin_dir)})
+    say("✅ Rollback complete")
+    return {"success": True, "version": entry.get("version")}
+
+
+async def ffmpeg_rollback_async() -> Dict[str, Any]:
+    _emit("ffmpeg", state="rolling_back", message="start")
+    loop = asyncio.get_running_loop()
+
+    def cb(msg):
+        loop.call_soon_threadsafe(_emit, "ffmpeg", state="rolling_back", message=msg)
+
+    try:
+        result = await asyncio.to_thread(ffmpeg_rollback_sync, cb)
+        _emit("ffmpeg", state="rolled_back",
+              message=result.get("version") or result.get("error"))
+        return result
+    except Exception as e:
+        _emit("ffmpeg", state="rolled_back", message=str(e))
+        return {"success": False, "error": str(e)}
 
 
 async def ffmpeg_install_async() -> Dict[str, Any]:
@@ -537,7 +850,8 @@ def deno_check() -> Dict[str, Any]:
             available = _cmp_tuple(latest) > _cmp_tuple(current)
         except Exception:
             available = False
-    return {"installed": installed, "current": current, "latest": latest or "Unknown", "update_available": available}
+    return {"installed": installed, "current": current, "latest": latest or "Unknown",
+            "update_available": available, "history": history_summary("deno")}
 
 
 async def deno_check_async() -> Dict[str, Any]:
@@ -545,29 +859,171 @@ async def deno_check_async() -> Dict[str, Any]:
 
 
 def deno_upgrade_sync(progress_cb=None) -> Dict[str, Any]:
-    """Official: upgrade_deno (ytsage_deno.py L686-752)."""
+    """Update Deno the same way as FFmpeg: download the official release zip,
+    verify SHA-256, extract, and replace the app-managed binary in place.
+
+    This replaces the old `deno upgrade` (which relied on the tool's own
+    self-update). The outgoing binary is archived first so the user can roll
+    back to the previous *installed* version.
+    """
+    import tempfile
+    import zipfile
+
     _busy_guard()
-    if not DENO_APP_BIN_PATH.exists():
-        return {"success": False, "error": f"Deno not found at {DENO_APP_BIN_PATH}"}
-    proc = subprocess.Popen(
-        [str(DENO_APP_BIN_PATH), "upgrade"],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, encoding="utf-8", errors="replace", bufsize=1,
-        creationflags=SUBPROCESS_CREATIONFLAGS if sys.platform == "win32" else 0,
-    )
-    out_lines = []
-    while True:
-        line = proc.stdout.readline()
-        if not line and proc.poll() is not None:
-            break
-        if line:
-            s = line.strip()
-            if s:
-                out_lines.append(s)
-                if progress_cb:
-                    progress_cb(s)
-    rc = proc.poll()
-    return {"success": rc == 0, "output": "\n".join(out_lines)}
+
+    def say(msg):
+        if progress_cb:
+            progress_cb(str(msg))
+
+    exe_name = "deno.exe" if OS_NAME == "Windows" else "deno"
+    target = DENO_APP_BIN_PATH
+    if not target.exists():
+        return {"success": False, "error": f"Deno not found at {target}"}
+
+    old_version = deno_current_version()
+    temp_zip = None
+    try:
+        say("⬇ Downloading Deno update (zip)...")
+        resp = requests.get(DENO_DOWNLOAD_URL, stream=True, timeout=120)
+        resp.raise_for_status()
+        temp_zip = tempfile.NamedTemporaryFile(delete=False, suffix=".zip").name
+        total = int(resp.headers.get("content-length") or 0)
+        done = 0
+        last_pct = -10
+        with open(temp_zip, "wb") as f:
+            for chunk in resp.iter_content(65536):
+                f.write(chunk)
+                done += len(chunk)
+                if total:
+                    pct = int(done * 100 / total)
+                    if pct - last_pct >= 10:
+                        say(f"  {pct}%")
+                        last_pct = pct
+
+        _verify_sha256_url(Path(temp_zip), DENO_SHA256_URL, say=say)
+
+        say("⚙ Extracting Deno...")
+        new_exe = None
+        with zipfile.ZipFile(temp_zip, "r") as zf:
+            if exe_name not in zf.namelist():
+                say(f"❌ {exe_name} not found in archive")
+                return {"success": False, "error": "exe_missing_in_zip"}
+            extract_dir = Path(tempfile.mkdtemp(prefix="deno_upd_"))
+            zf.extract(exe_name, extract_dir)
+            new_exe = extract_dir / exe_name
+
+        if not new_exe or not new_exe.exists():
+            say("❌ Extraction failed")
+            return {"success": False, "error": "extract_failed"}
+
+        # Archive the outgoing binary before swapping it out.
+        if old_version and not old_version.startswith(("Error", "Not found")):
+            archive_payload("deno", old_version, target)
+
+        say("🔧 Installing new Deno...")
+        if OS_NAME == "Windows":
+            # Windows can't overwrite a running exe; move the old one aside first.
+            backup = Path(str(target) + ".old")
+            try:
+                if backup.exists():
+                    backup.unlink(missing_ok=True)
+                target.rename(backup)
+                shutil.copy2(new_exe, target)
+                try:
+                    backup.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            except Exception:
+                shutil.copy2(new_exe, target)
+        else:
+            shutil.copy2(new_exe, target)
+            os.chmod(target, 0o755)
+
+        say("✅ Verifying update...")
+        r = _run([str(target), "--version"], timeout=15)
+        ok = r.returncode == 0
+        if ok:
+            record_install("deno", deno_current_version())
+        say("✅ Deno update completed!" if ok else "❌ Deno update verification failed")
+        return {"success": ok}
+    except Exception as e:
+        logger.error(f"[WebUI] deno update failed: {e}")
+        say(f"❌ Deno update failed: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        if temp_zip:
+            try:
+                Path(temp_zip).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+def deno_rollback_sync(progress_cb=None) -> Dict[str, Any]:
+    """Restore the previously installed Deno binary (not upstream's prev release)."""
+    _busy_guard()
+    target = DENO_APP_BIN_PATH
+
+    def say(msg):
+        if progress_cb:
+            progress_cb(str(msg))
+
+    entry = _pop_previous("deno")
+    if not entry:
+        return {"success": False, "error": "no_history"}
+    src = Path(entry.get("file") or "")
+    if not src.exists():
+        say(f"❌ Archived binary missing: {src}")
+        return {"success": False, "error": "archive_missing", "version": entry.get("version")}
+
+    say(f"↩ Restoring Deno {entry.get('version')}...")
+    # Archive the binary we are rolling AWAY from, so the user can roll
+    # forward again. Must happen BEFORE the restore overwrites `target`.
+    current_version = deno_current_version()
+    if target.exists() and current_version and not current_version.startswith(("Error", "Not found")):
+        archive_payload("deno", current_version, target)
+    try:
+        if OS_NAME == "Windows":
+            backup = Path(str(target) + ".old")
+            if backup.exists():
+                backup.unlink(missing_ok=True)
+            if target.exists():
+                target.rename(backup)
+            shutil.copy2(src, target)
+            try:
+                backup.unlink(missing_ok=True)
+            except Exception:
+                pass
+        else:
+            shutil.copy2(src, target)
+            os.chmod(target, 0o755)
+    except Exception as e:
+        say(f"❌ Rollback failed: {e}")
+        return {"success": False, "error": str(e)}
+
+    r = _run([str(target), "--version"], timeout=15)
+    if r.returncode != 0:
+        say("❌ Rollback verification failed")
+        return {"success": False, "error": "verify_failed"}
+    record_install("deno", entry.get("version") or "")
+    say("✅ Rollback complete")
+    return {"success": True, "version": entry.get("version")}
+
+
+async def deno_rollback_async() -> Dict[str, Any]:
+    _emit("deno", state="rolling_back", message="start")
+    loop = asyncio.get_running_loop()
+
+    def cb(msg):
+        loop.call_soon_threadsafe(_emit, "deno", state="rolling_back", message=msg)
+
+    try:
+        result = await asyncio.to_thread(deno_rollback_sync, cb)
+        _emit("deno", state="rolled_back",
+              message=result.get("version") or result.get("error"))
+        return result
+    except Exception as e:
+        _emit("deno", state="rolled_back", message=str(e))
+        return {"success": False, "error": str(e)}
 
 
 async def deno_upgrade_async() -> Dict[str, Any]:
@@ -648,9 +1104,10 @@ async def state() -> Dict[str, Any]:
     deno = await asyncio.to_thread(deno_check)
     return {
         "updating_ytdlp": updating_ytdlp,
-        "ytdlp": {**ytdlp, "channel": cfg_get("ytdlp_channel") or "stable"},
-        "ffmpeg": ffmpeg,
-        "deno": deno,
+        "ytdlp": {**ytdlp, "channel": cfg_get("ytdlp_channel") or "stable",
+                  "history": history_summary("ytdlp")},
+        "ffmpeg": {**ffmpeg, "history": history_summary("ffmpeg")},
+        "deno": {**deno, "history": history_summary("deno")},
         "auto_update": {
             "enabled": bool(cfg_get("auto_update_ytdlp")),
             "frequency": cfg_get("auto_update_frequency") or "daily",

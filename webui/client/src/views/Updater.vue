@@ -8,10 +8,17 @@
         <el-descriptions-item :label="t('ffmpeg_updater.latest_version')">{{ yt.latest || '-' }}</el-descriptions-item>
       </el-descriptions>
       <el-progress v-if="yt.busy" :percentage="yt.progress || 0" style="margin-top: 10px" />
+      <div v-if="yt.log" class="console-output" style="height: 120px; margin-top: 10px">{{ yt.log }}</div>
       <p class="status" :class="statusClass(yt)">{{ ytStatusText }}</p>
       <div class="row">
         <el-button size="small" @click="checkYt" :loading="yt.checking">{{ t('ffmpeg_updater.check_updates') }}</el-button>
         <el-button size="small" type="primary" :disabled="!yt.update_available || yt.busy" @click="updateYt">{{ t('buttons.update') }}</el-button>
+        <el-button
+          v-if="yt.history && yt.history.rollback_available"
+          size="small" type="warning" plain :disabled="yt.busy"
+          :title="t('web.rollback.hint')"
+          @click="doRollback('ytdlp', yt)"
+        >{{ t('web.rollback.to', { version: yt.history.rollback_to }) }}</el-button>
       </div>
 
       <el-divider />
@@ -71,6 +78,12 @@
       <div class="row">
         <el-button size="small" @click="checkDn" :loading="dn.checking">{{ t('deno_updater.check_updates') }}</el-button>
         <el-button size="small" type="primary" :disabled="!dn.update_available || dn.busy" @click="updateDn">{{ t('deno_updater.update_now') }}</el-button>
+        <el-button
+          v-if="dn.history && dn.history.rollback_available"
+          size="small" type="warning" plain :disabled="dn.busy"
+          :title="t('web.rollback.hint')"
+          @click="doRollback('deno', dn)"
+        >{{ t('web.rollback.to', { version: dn.history.rollback_to }) }}</el-button>
       </div>
     </div>
 
@@ -100,10 +113,10 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  updaterState, checkYtdlp, updateYtdlp, setYtdlpChannel, setYtdlpAuto,
-  checkFfmpeg, installFfmpeg, checkDeno, updateDeno, checkApp,
+  updaterState, checkYtdlp, updateYtdlp, rollbackYtdlp, setYtdlpChannel, setYtdlpAuto,
+  checkFfmpeg, installFfmpeg, rollbackFfmpeg, checkDeno, updateDeno, rollbackDeno, checkApp,
 } from '@/api/updater'
 import { useSettingsStore } from '@/stores/settings'
 import { useDownloadStore } from '@/stores/download'
@@ -158,18 +171,24 @@ watch(() => downloadStore.updaterEvents, (ev) => {
     else if (e.state === 'failed') { yt.value.busy = false; ElMessage.error(t('update.update_failed')) }
     else if (e.state === 'switching_channel') { yt.value.busy = true }
     else if (e.state === 'channel_switched') { yt.value.busy = false }
+    else if (e.state === 'rolling_back') { yt.value.busy = true; if (e.message) yt.value.log += e.message + '\n' }
+    else if (e.state === 'rolled_back') { yt.value.busy = false; checkYt() }
   }
   if (ev.ffmpeg) {
     const e = ev.ffmpeg
     if (e.state === 'installing') { ff.value.busy = true; if (e.message) ff.value.log += e.message + '\n' }
     else if (e.state === 'done') { ff.value.busy = false; ElMessage.success(e.updated ? t('web.ffmpeg.update_success') : t('ffmpeg.install_success')); checkFf() }
     else if (e.state === 'failed') { ff.value.busy = false; ElMessage.error(t('ffmpeg.installation_failed')) }
+    else if (e.state === 'rolling_back') { ff.value.busy = true; if (e.message) ff.value.log += e.message + '\n' }
+    else if (e.state === 'rolled_back') { ff.value.busy = false; checkFf() }
   }
   if (ev.deno) {
     const e = ev.deno
     if (e.state === 'upgrading') { dn.value.busy = true; if (e.message) dn.value.log += e.message + '\n' }
     else if (e.state === 'done') { dn.value.busy = false; ElMessage.success(t('deno_updater.update_success')); checkDn() }
     else if (e.state === 'failed') { dn.value.busy = false; ElMessage.error(t('deno_updater.update_failed')) }
+    else if (e.state === 'rolling_back') { dn.value.busy = true; if (e.message) dn.value.log += e.message + '\n' }
+    else if (e.state === 'rolled_back') { dn.value.busy = false; checkDn() }
   }
 }, { deep: true })
 
@@ -227,6 +246,32 @@ async function updateDn() {
   try { const r = await updateDeno(); if (!r.success) ElMessage.error(t('deno_updater.update_failed')) }
   catch (e) { ElMessage.error(errText(e)) }
   finally { dn.value.busy = false; checkDn() }
+}
+
+const rollbackFns = { ytdlp: rollbackYtdlp, ffmpeg: rollbackFfmpeg, deno: rollbackDeno }
+const rollbackChecks = { ytdlp: checkYt, ffmpeg: checkFf, deno: checkDn }
+async function doRollback(comp, card) {
+  const target = card.history?.rollback_to
+  if (!target) { ElMessage.info(t('web.rollback.no_history')); return }
+  try {
+    await ElMessageBox.confirm(
+      t('web.rollback.confirm_message', { version: target }),
+      t('web.rollback.confirm_title'),
+      { type: 'warning', confirmButtonText: t('web.rollback.button'), cancelButtonText: t('buttons.cancel') },
+    )
+  } catch { return }
+  card.log = ''
+  card.busy = true
+  try {
+    const r = await rollbackFns[comp]()
+    if (r.success) ElMessage.success(t('web.rollback.success', { version: r.version || target }))
+    else ElMessage.error(t('web.rollback.failed', { error: r.error || 'unknown' }))
+  } catch (e) {
+    ElMessage.error(t('web.rollback.failed', { error: errText(e) }))
+  } finally {
+    card.busy = false
+    rollbackChecks[comp]()
+  }
 }
 async function doCheckApp() {
   app.value.checking = true

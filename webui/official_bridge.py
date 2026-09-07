@@ -41,10 +41,13 @@ try:
         USER_HOME_DIR,
         VIDEO_EXTENSIONS,
         DENO_APP_BIN_PATH,
+        DENO_DOWNLOAD_URL,
+        DENO_SHA256_URL,
         FFMPEG_ZIP_DOWNLOAD_URL,
         FFMPEG_ZIP_VERSION_URL,
         YTDLP_APP_BIN_PATH,
         YTDLP_DOCS_URL,
+        YTDLP_DOWNLOAD_URL,
     )
     HAS_CONSTANTS = True
 except ImportError:
@@ -68,6 +71,12 @@ except ImportError:
     DENO_APP_BIN_PATH = APP_BIN_DIR / ("deno.exe" if OS_NAME == "Windows" else "deno")
     _dl_name = {"Windows": "yt-dlp.exe", "Darwin": "yt-dlp_macos"}.get(OS_NAME, "yt-dlp")
     YTDLP_DOWNLOAD_URL = f"https://github.com/yt-dlp/yt-dlp/releases/latest/download/{_dl_name}"
+    _deno_arch = {
+        "Windows": "deno-x86_64-pc-windows-msvc.zip",
+        "Darwin": "deno-x86_64-apple-darwin.zip",
+    }.get(OS_NAME, "deno-x86_64-unknown-linux-gnu.zip")
+    DENO_DOWNLOAD_URL = f"https://github.com/denoland/deno/releases/latest/download/{_deno_arch}"
+    DENO_SHA256_URL = f"{DENO_DOWNLOAD_URL}.sha256sum"
     SOUND_PATH = Path(__file__).parent.parent / "ytsage" / "assets" / "sound" / "notification.mp3"
     SUBPROCESS_CREATIONFLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
     VIDEO_EXTENSIONS = frozenset({".mp4", ".webm", ".mkv", ".avi", ".mov", ".flv"})

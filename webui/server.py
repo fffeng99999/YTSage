@@ -557,6 +557,14 @@ async def updater_ytdlp_update(auth: dict = Depends(get_current_user)):
         raise HTTPException(status_code=409, detail=str(e))
 
 
+@app.post("/api/updater/ytdlp/rollback")
+async def updater_ytdlp_rollback(auth: dict = Depends(get_current_user)):
+    try:
+        return await updater_service.ytdlp_rollback_async()
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
 @app.post("/api/updater/ytdlp/channel")
 async def updater_ytdlp_channel(req: YtdlpChannelRequest, auth: dict = Depends(get_current_user)):
     try:
@@ -585,6 +593,11 @@ async def updater_ffmpeg_install(auth: dict = Depends(get_current_user)):
     return await updater_service.ffmpeg_install_async()
 
 
+@app.post("/api/updater/ffmpeg/rollback")
+async def updater_ffmpeg_rollback(auth: dict = Depends(get_current_user)):
+    return await updater_service.ffmpeg_rollback_async()
+
+
 @app.post("/api/updater/deno/check")
 async def updater_deno_check(auth: dict = Depends(get_current_user)):
     return await updater_service.deno_check_async()
@@ -593,6 +606,11 @@ async def updater_deno_check(auth: dict = Depends(get_current_user)):
 @app.post("/api/updater/deno/update")
 async def updater_deno_update(auth: dict = Depends(get_current_user)):
     return await updater_service.deno_upgrade_async()
+
+
+@app.post("/api/updater/deno/rollback")
+async def updater_deno_rollback(auth: dict = Depends(get_current_user)):
+    return await updater_service.deno_rollback_async()
 
 
 @app.post("/api/updater/app/check")
