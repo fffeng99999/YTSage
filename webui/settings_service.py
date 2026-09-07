@@ -63,6 +63,29 @@ def _bool_default_true(v: Any) -> bool:
     return not (v is False)
 
 
+# Video codec priority (drag-order list in Settings -> Format tab)
+CODEC_CHOICES = ("av01", "vp09", "avc1")
+DEFAULT_CODEC_PRIORITY = ["av01", "vp09", "avc1"]
+
+
+def _codec_priority_or_none(v: Any) -> Optional[list]:
+    """Validate a codec-priority list: unique subset of CODEC_CHOICES, in order.
+
+    Empty / None means "use the default order".
+    """
+    if v is None or v == "":
+        return None
+    if not isinstance(v, list):
+        raise ValueError("must be a list of codecs")
+    out = [str(x) for x in v]
+    if len(set(out)) != len(out):
+        raise ValueError("duplicate codecs")
+    for c in out:
+        if c not in CODEC_CHOICES:
+            raise ValueError(f"unknown codec: {c} (expected one of {', '.join(CODEC_CHOICES)})")
+    return out or None
+
+
 # Full settings whitelist: key -> (validator, default)
 SETTINGS_SCHEMA: Dict[str, Any] = {
     "download_path": (_STR, str(USER_HOME_DIR / "Downloads")),
@@ -98,6 +121,7 @@ SETTINGS_SCHEMA: Dict[str, Any] = {
     "filename_format": (_STR, "%(title)s_%(resolution)s_[%(id)s].%(ext)s"),
     "default_video_quality": (_STR_OR_NONE, None),
     "default_subtitle_language": (_STR_OR_NONE, None),
+    "codec_priority": (_codec_priority_or_none, list(DEFAULT_CODEC_PRIORITY)),
 }
 
 PUBLIC_KEYS = list(SETTINGS_SCHEMA.keys())

@@ -37,9 +37,6 @@
         <el-input v-model="downloadPath" size="large" :placeholder="t('settings.download_path')" style="flex:1" :disabled="downloading">
           <template #prepend>{{ t('settings.download_path') }}</template>
         </el-input>
-        <el-button size="large" type="danger" :loading="starting" :disabled="!canDownload" @click="startDownload">
-          {{ t('buttons.download') }}
-        </el-button>
         <el-button v-if="currentJob && currentJob.status === 'running'" size="large" @click="pauseJob">
           {{ t('buttons.pause') }}
         </el-button>
@@ -140,6 +137,19 @@
       </div>
     </div>
 
+    <!-- ===== floating download button (bottom-right) ===== -->
+    <el-tooltip :content="t('buttons.download')" placement="left">
+      <button
+        class="dl-fab"
+        :class="{ 'dl-fab-busy': !canDownload }"
+        :disabled="!canDownload"
+        @click="startDownload"
+      >
+        <span v-if="starting" class="fab-spinner"></span>
+        <el-icon v-else :size="26"><Download /></el-icon>
+      </button>
+    </el-tooltip>
+
     <!-- dialogs -->
     <SubtitleDialog v-model="subDialog" />
     <SponsorBlockDialog v-model="sbDialog" />
@@ -161,6 +171,9 @@ import { exportPlaylist } from '@/api/tools'
 import { errText } from '@/api/http'
 import { useReveal } from '@/composables/useReveal'
 import { playNotification } from '@/composables/useSound'
+import { readClipboardText } from '@/composables/useClipboard'
+import { useSessionRef } from '@/composables/useSessionRef'
+import { Download } from '@element-plus/icons-vue'
 import VideoInfoCard from '@/components/VideoInfoCard.vue'
 import FormatTable from '@/components/FormatTable.vue'
 import SubtitleDialog from '@/components/SubtitleDialog.vue'
@@ -176,7 +189,7 @@ const downloadStore = useDownloadStore()
 const settingsStore = useSettingsStore()
 const { reveal } = useReveal()
 
-const url = ref('')
+const url = useSessionRef('ytsage_session_dash_url', '')
 const downloadPath = ref('')
 const analyzing = ref(false)
 const analyzePct = ref(0)
@@ -233,10 +246,10 @@ function statusTag(s) {
 }
 
 async function pasteUrl() {
-  try {
-    const text = await navigator.clipboard.readText()
-    if (text) url.value = text.trim()
-  } catch {
+  const text = await readClipboardText()
+  if (text) {
+    url.value = text
+  } else {
     ElMessage.warning(t('main_ui.please_enter_url'))
   }
 }
@@ -383,4 +396,44 @@ watch(() => settingsStore.downloadPath, (v) => { if (v && !downloadPath.value) d
   border-bottom: 1px solid var(--yts-border);
 }
 .recent-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+
+/* Floating circular download button (Dashboard page only) */
+.dl-fab {
+  position: fixed;
+  right: 32px;
+  bottom: 32px;
+  z-index: 2000;
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  background: linear-gradient(135deg, #e0191c, #a50000);
+  box-shadow: 0 6px 18px rgba(201, 0, 0, 0.45);
+  transition: transform 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
+}
+.dl-fab:hover:not(:disabled) {
+  transform: scale(1.08);
+  box-shadow: 0 8px 24px rgba(201, 0, 0, 0.6);
+}
+.dl-fab:active:not(:disabled) { transform: scale(0.96); }
+.dl-fab:disabled,
+.dl-fab-busy {
+  cursor: not-allowed;
+  opacity: 0.45;
+  box-shadow: none;
+}
+.fab-spinner {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 3px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+  animation: fab-spin 0.8s linear infinite;
+}
+@keyframes fab-spin { to { transform: rotate(360deg); } }
 </style>

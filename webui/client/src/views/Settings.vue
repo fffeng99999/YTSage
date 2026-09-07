@@ -70,6 +70,14 @@
             </el-form-item>
 
             <el-divider />
+            <el-form-item :label="t('web.codec.title')">
+              <div style="width: 100%">
+                <CodecPriorityBuilder v-model="form.codec_priority" />
+                <span class="help">{{ t('web.codec.help') }}</span>
+              </div>
+            </el-form-item>
+
+            <el-divider />
             <el-form-item :label="t('settings.defaults_settings')">
               <span class="help">{{ t('settings.defaults_help') }}</span>
             </el-form-item>
@@ -137,6 +145,7 @@ import { useSettingsStore } from '@/stores/settings'
 import { changePassword } from '@/api/auth'
 import { errText } from '@/api/http'
 import FilenameBuilder from '@/components/FilenameBuilder.vue'
+import CodecPriorityBuilder from '@/components/CodecPriorityBuilder.vue'
 
 const { t } = useI18n()
 const settingsStore = useSettingsStore()

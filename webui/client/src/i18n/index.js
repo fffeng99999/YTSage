@@ -57,8 +57,20 @@ const WEB_EXTRA = {
       setup_import: 'Import current desktop app settings as starting values',
       setup_next: 'Next', setup_back: 'Back', setup_finish: 'Finish Setup',
       batch_title: 'Batch & Channel',
+      clipboard_manual_paste: 'Direct clipboard access is unavailable (page not opened via https/localhost). Paste the link here with Ctrl+V:',
+      clipboard_manual_placeholder: 'Paste here (Ctrl+V)…',
       errors: {
         postprocessing_failed: "The download finished but post-processing failed (merging / subtitle embedding / SponsorBlock chapter editing). The link is fine - try again with SponsorBlock or 'merge subtitles' turned off, or pick a different quality. Details: {error}",
+      },
+      codec: {
+        title: 'Video Codec Priority',
+        help: 'Drag to order. Batch & channel downloads prefer the top codec and only fall back to lower ones when it is unavailable. Codecs left in the pool are used as a last resort.',
+        pool: 'Unused Codecs',
+        pool_empty: 'All codecs are in the priority list',
+        sequence: 'Priority Order (drag to reorder)',
+        empty: 'Drag codecs here to set priority',
+        hint_pool: 'Drag a codec into the priority list; drag it back here to deprioritize it.',
+        hint_seq: 'Top = highest priority. Click × to remove a codec from the list.',
       },
       filename: {
         pool: 'Block Pool (unused tokens)',
@@ -167,8 +179,20 @@ const WEB_EXTRA = {
       setup_import: '导入桌面版当前设置作为初始值',
       setup_next: '下一步', setup_back: '上一步', setup_finish: '完成设置',
       batch_title: '批量下载',
+      clipboard_manual_paste: '无法直接读取剪贴板(页面未通过 https/localhost 打开)。请在此按 Ctrl+V 粘贴链接:',
+      clipboard_manual_placeholder: '在此粘贴(Ctrl+V)…',
       errors: {
         postprocessing_failed: "视频已下载完成，但后处理失败（合并、内嵌字幕或 SponsorBlock 章节编辑）。链接本身没有问题——请尝试关闭 SponsorBlock 或“合并字幕”后重试，或换一种画质。详情：{error}",
+      },
+      codec: {
+        title: '视频编码优先级',
+        help: '拖拽排序。批量下载与频道下载优先选择排在上方的编码，仅在其不可用时才回退到后面的编码；留在块池中的编码只作为最后兜底使用。',
+        pool: '未使用的编码',
+        pool_empty: '所有编码都已在优先级列表中',
+        sequence: '优先级顺序（拖拽排序）',
+        empty: '把编码拖到这里设置优先级',
+        hint_pool: '把编码拖入右侧优先级列表；拖回这里即降低为兜底。',
+        hint_seq: '越靠前优先级越高；点击 × 移出列表。',
       },
       filename: {
         pool: '块池（未使用的通配符）',

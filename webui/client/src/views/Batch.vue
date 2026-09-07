@@ -245,6 +245,8 @@ import { analyzeBatch, analyzeChannel } from '@/api/batch'
 import { startDownload } from '@/api/download'
 import { errText } from '@/api/http'
 import { SPONSORBLOCK_CATEGORIES } from '@/stores/analysis'
+import { readClipboardText } from '@/composables/useClipboard'
+import { useSessionRef } from '@/composables/useSessionRef'
 import { useDownloadStore } from '@/stores/download'
 import { useSettingsStore } from '@/stores/settings'
 
@@ -268,9 +270,20 @@ const optSaveDescription = ref(false)
 const optSponsorblock = ref(false)
 
 /* --------------------------------------------------------------------------
- * Quality selection with codec priority av01 > vp09 > avc1
+ * Quality selection with codec priority (configurable in Settings -> Format,
+ * default av01 > vp09 > avc1)
  * ------------------------------------------------------------------------ */
-const CODEC_LABELS = { av01: 'AV1', vp09: 'VP9', avc: 'AVC/H.264' }
+const CODEC_LABELS = { av01: 'AV1', vp09: 'VP9', avc1: 'AVC/H.264' }
+const ALL_CODEC_KEYS = ['av01', 'vp09', 'avc1']
+
+// Full preference order: user-prioritized codecs first (Settings drag UI),
+// then any codec the user left in the pool as last-resort fallback, so a
+// download never fails just because its only codec was deprioritized.
+const codecOrder = computed(() => {
+  const pref = (settingsStore.settings && settingsStore.settings.codec_priority) || ALL_CODEC_KEYS
+  const valid = pref.filter((k) => ALL_CODEC_KEYS.includes(k))
+  return [...valid, ...ALL_CODEC_KEYS.filter((k) => !valid.includes(k))]
+})
 
 const qualityOptions = computed(() => {
   const s = settingsStore.settings || {}
@@ -285,16 +298,21 @@ const qualityOptions = computed(() => {
 const qualityIdx = ref(0)
 const currentQuality = computed(() => qualityOptions.value[qualityIdx.value] || qualityOptions.value[0])
 
-function codecRank(vcodec) {
+function codecFamily(vcodec) {
   const s = (vcodec || '').toLowerCase()
-  if (s.startsWith('av01')) return 0
-  if (s.startsWith('vp09') || s.startsWith('vp9')) return 1
-  if (s.startsWith('avc')) return 2
-  return 3
+  if (s.startsWith('av01')) return 'av01'
+  if (s.startsWith('vp09') || s.startsWith('vp9')) return 'vp09'
+  if (s.startsWith('avc')) return 'avc1'
+  return null
+}
+function codecRank(vcodec) {
+  const fam = codecFamily(vcodec)
+  if (!fam) return 99
+  return codecOrder.value.indexOf(fam)
 }
 function codecName(vcodec) {
-  const r = codecRank(vcodec)
-  return CODEC_LABELS[['av01', 'vp09', 'avc'][r]] || (vcodec || '-')
+  const fam = codecFamily(vcodec)
+  return (fam && CODEC_LABELS[fam]) || (vcodec || '-')
 }
 
 /**
@@ -326,7 +344,8 @@ function pickFormats(formats, height, audioOnly) {
 function chainSelector(height, audioOnly) {
   if (audioOnly) return 'bestaudio/best'
   const h = height ? `[height<=${height}]` : ''
-  const parts = ['av01', 'vp09', 'avc1'].map(
+  // codecOrder.value keys are exactly the yt-dlp vcodec prefixes (av01/vp09/avc1)
+  const parts = codecOrder.value.map(
     (c) => `bv*[vcodec^=${c}]${h}+ba/b*[vcodec^=${c}]${h}`
   )
   parts.push('bv*+ba/b')
@@ -427,7 +446,7 @@ function doneNotification(count) {
 /* --------------------------------------------------------------------------
  * Batch tab
  * ------------------------------------------------------------------------ */
-const urlsText = ref('')
+const urlsText = useSessionRef('ytsage_session_batch_urls', '')
 const batchParsing = ref(false)
 const batchRows = ref([])
 const batchSelected = ref([])
@@ -438,10 +457,10 @@ const batchDone = computed(() => batchPump.state.done)
 const batchTotal = computed(() => batchPump.state.total)
 
 async function pasteUrls() {
-  try {
-    const text = await navigator.clipboard.readText()
-    if (text) urlsText.value = (urlsText.value ? urlsText.value + '\n' : '') + text.trim()
-  } catch {
+  const text = await readClipboardText()
+  if (text) {
+    urlsText.value = (urlsText.value ? urlsText.value + '\n' : '') + text
+  } else {
     ElMessage.warning(t('main_ui.please_enter_url'))
   }
 }
@@ -477,6 +496,7 @@ function applyQualityToBatchRows() {
   }
 }
 watch(currentQuality, applyQualityToBatchRows)
+watch(codecOrder, applyQualityToBatchRows)
 
 /** Build a payload that mirrors Dashboard's single-video download exactly. */
 function buildBatchPayload(row) {
@@ -582,7 +602,7 @@ async function startBatchDownload() {
 /* --------------------------------------------------------------------------
  * Channel tab (paginated + fuzzy search, selection pinned to top)
  * ------------------------------------------------------------------------ */
-const channelUrl = ref('')
+const channelUrl = useSessionRef('ytsage_session_channel_url', '')
 const channelTab = ref('videos')
 const channelParsing = ref(false)
 const channelResult = ref(null)
