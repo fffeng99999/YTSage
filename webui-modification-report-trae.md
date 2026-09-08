@@ -1,4 +1,4 @@
-# YTSage WebUI 修改汇总报告（Trae Code）
+# YTSage WebUI 修改汇总报告
 
 > 生成日期：2026-09-08
 > 数据来源：项目记忆（project_memory + 20260906–20260908 全部会话记录）与 git 提交历史
@@ -125,3 +125,7 @@ ed5c46f feat(webui): add first-run setup wizard and multi-mode config storage
 - 程序运行于 `http://localhost:8765`（密码 `ytsage`），/api/health 全绿：official_available=true、history_available=true、missing_binaries 为空
 - 局域网 + 默认密码提示为模块 4 预期行为，建议在设置页修改密码
 - 全部 7 模块重构完成并验证；前端 build 通过；官方源码保持零改动
+
+---
+
+*— End of report —*
