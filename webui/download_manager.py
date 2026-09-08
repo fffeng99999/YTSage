@@ -57,12 +57,12 @@ if not logger.handlers:
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
 
-# On Windows, the frozen yt-dlp exe writes non-ASCII output (e.g. CJK file
-# names) using the system ANSI codepage (cp936 on zh_CN), NOT UTF-8, and
-# PYTHONIOENCODING has no effect on it. Note cp936 byte pairs often form
-# *valid* UTF-8 accidentally, so on Windows we must try ANSI first.
-# locale.getpreferredencoding() can return "utf-8" under modern Python
-# UTF-8 mode, so read the real ACP via ctypes (GetACP).
+# Windows 下，冻结后的 yt-dlp exe 使用系统 ANSI 代码页（中文系统上为 cp936）
+# 而非 UTF-8 来写入非 ASCII 输出（例如 CJK 文件名），PYTHONIOENCODING 对它
+# 没有影响。注意 cp936 的字节对常常会意外地构成 *有效的* UTF-8 序列，
+# 所以 Windows 上必须优先尝试 ANSI 解码。
+# locale.getpreferredencoding() 在现代 Python 的 UTF-8 模式下可能返回
+# "utf-8"，因此需要通过 ctypes (GetACP) 读取真正的 ACP。
 def _detect_output_encoding() -> str:
     if sys.platform == "win32":
         try:
@@ -324,10 +324,14 @@ def build_ytdlp_command(job: DownloadJob) -> List[str]:
         if job.force_keyframes:
             cmd.append("--force-keyframes-at-cuts")
 
+    # --- 错误容忍 ---
+    # yt-dlp 会在下载视频主体之前先下载字幕/描述文件；如果字幕接口临时返回 HTTP 429，
+    # 整个任务就会中断，视频也不会被下载。只有 --ignore-errors（True）能将字幕下载失败
+    # 降级为警告；--no-abort-on-error 会用 'only_download' 覆盖同一参数，仍然会抛出异常。
+    # 真正的下载失败仍会由 _run_download 中的输出文件检查来捕获。
+    cmd.append("--ignore-errors")
+
     # --- URL ---
-    if job.is_playlist:
-        cmd.append("--ignore-errors")
-        cmd.append("--no-abort-on-error")
     cmd.append(job.url)
 
     return cmd
@@ -651,24 +655,31 @@ class DownloadManager:
             job.status = "cancelled"
             await asyncio.to_thread(cleanup_partial_files, job.path)
         elif rc == 0 or (job.is_playlist and rc != 0 and job.current_filename is not None):
-            job.status = "completed"
             job.progress = 100.0
             self._find_final_file(job)
-            # Save thumbnail into the per-video folder (official: ytsage_gui_main.py L894-901)
-            if job.save_thumbnail and job.thumbnail_url and job.last_file_path:
-                try:
-                    from .thumbnail_service import save_thumbnail_to_dir
-                    await asyncio.to_thread(
-                        save_thumbnail_to_dir,
-                        job.thumbnail_url,
-                        str(Path(job.last_file_path).parent),
-                        job.title or "thumbnail",
-                    )
-                except Exception as e:
-                    logger.warning(f"[WebUI] save thumbnail failed: {e}")
-            if job.merge_subs and job.subtitle_langs:
-                await asyncio.to_thread(cleanup_merged_subtitle_files, job.path, job._subtitle_files_before)
-            await self._write_history(job)
+            # --ignore-errors keeps the exit code at 0 even when the media
+            # body itself failed; require a real output file to call it done.
+            if not job.last_file_path or not Path(job.last_file_path).exists():
+                job.status = "error"
+                if not job.error:
+                    job.error = "yt-dlp finished without producing a media file"
+            else:
+                job.status = "completed"
+                # Save thumbnail into the per-video folder (official: ytsage_gui_main.py L894-901)
+                if job.save_thumbnail and job.thumbnail_url:
+                    try:
+                        from .thumbnail_service import save_thumbnail_to_dir
+                        await asyncio.to_thread(
+                            save_thumbnail_to_dir,
+                            job.thumbnail_url,
+                            str(Path(job.last_file_path).parent),
+                            job.title or "thumbnail",
+                        )
+                    except Exception as e:
+                        logger.warning(f"[WebUI] save thumbnail failed: {e}")
+                if job.merge_subs and job.subtitle_langs:
+                    await asyncio.to_thread(cleanup_merged_subtitle_files, job.path, job._subtitle_files_before)
+                await self._write_history(job)
         else:
             job.status = "error"
             if not job.error:
