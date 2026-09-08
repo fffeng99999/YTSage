@@ -172,6 +172,27 @@ async def remove_entry(entry_id: str) -> bool:
     return await asyncio.to_thread(_with_retry, _OfficialHistoryManager.remove_entry, entry_id)
 
 
+async def remove_entries(entry_ids: List[str]) -> int:
+    """Batch remove multiple history entries (multi-select delete).
+
+    The official HistoryManager only exposes per-id remove_entry, so each id
+    goes through it individually; a single failing id is logged and skipped
+    rather than aborting the whole batch. Returns the count actually removed.
+    """
+    if not entry_ids:
+        return 0
+    if not _available():
+        return 0
+    removed = 0
+    for eid in entry_ids:
+        try:
+            ok = await asyncio.to_thread(_with_retry, _OfficialHistoryManager.remove_entry, eid)
+            removed += 1 if ok else 0
+        except Exception as e:  # noqa: BLE001 - one bad id must not kill the batch
+            logger.warning(f"[WebUI] batch history remove failed for {eid}: {e}")
+    return removed
+
+
 async def clear_history() -> int:
     if not _available():
         return 0

@@ -23,7 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from . import analysis_service, channel_service, cookie_store, history_service, playlist_export, system_service, updater_service
+from . import analysis_service, channel_service, cookie_store, history_service, log_service, playlist_export, system_service, updater_service
 from .auth import create_token, set_password, verify_password, verify_token
 from .command_service import command_service
 from .download_manager import download_manager
@@ -46,6 +46,7 @@ from .schemas import (
     CommandRunRequest,
     CookieApplyRequest,
     DownloadRequest,
+    HistoryBatchDeleteRequest,
     LoginRequest,
     OpenFolderRequest,
     PasswordChangeRequest,
@@ -419,6 +420,15 @@ async def history_delete(entry_id: str, auth: dict = Depends(get_current_user)):
     return {"ok": await history_service.remove_entry(entry_id)}
 
 
+@app.post("/api/history/batch-delete")
+async def history_batch_delete(req: HistoryBatchDeleteRequest, auth: dict = Depends(get_current_user)):
+    """Multi-select history delete (module 2.1): removes many entries in one call."""
+    if not req.ids:
+        raise HTTPException(status_code=400, detail="No history ids provided")
+    removed = await history_service.remove_entries(req.ids)
+    return {"removed": removed}
+
+
 @app.delete("/api/history")
 async def history_clear(auth: dict = Depends(get_current_user)):
     return {"removed": await history_service.clear_history()}
@@ -496,6 +506,34 @@ async def system_open_logs(auth: dict = Depends(get_current_user)):
     if not ok:
         raise HTTPException(status_code=400, detail="Could not open logs folder")
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Log viewer (About page live log tail)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/logs/files")
+async def logs_files(auth: dict = Depends(get_current_user)):
+    """List log files in the app log directory (current + rotated archives)."""
+    return {"files": await asyncio.to_thread(log_service.list_log_files)}
+
+
+@app.get("/api/logs/read")
+async def logs_read(
+    name: str = Query(...),
+    offset: int = Query(0, ge=0),
+    max_bytes: int = Query(65536, ge=8, le=65536),
+    auth: dict = Depends(get_current_user),
+):
+    """Incremental log read: returns the next chunk from a byte offset.
+
+    The frontend polls this endpoint every couple of seconds and appends
+    the returned content ('rotated' => reset offset and clear the buffer).
+    """
+    try:
+        return await asyncio.to_thread(log_service.read_log, name, offset, max_bytes)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @app.get("/api/download-file")

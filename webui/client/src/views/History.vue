@@ -11,17 +11,40 @@
           style="width: 280px"
           @input="debouncedLoad"
         />
-        <span class="count">{{ t('history.entries_count', { count: total }) }}</span>
-        <el-button size="small" type="danger" @click="clearAll" :disabled="!entries.length">
-          {{ t('history.clear_all') }}
-        </el-button>
+        <template v-if="selectMode">
+          <span class="count">{{ t('web.history.selected_count', { count: selected.size }) }}</span>
+          <el-button size="small" type="danger" :disabled="!selected.size" @click="removeSelected">
+            {{ t('web.history.delete_selected') }}
+          </el-button>
+          <el-button size="small" @click="toggleSelectMode">{{ t('web.history.exit_select_mode') }}</el-button>
+        </template>
+        <template v-else>
+          <span class="count">{{ t('history.entries_count', { count: total }) }}</span>
+          <el-button size="small" @click="toggleSelectMode">{{ t('web.history.select_mode') }}</el-button>
+          <el-button size="small" type="danger" @click="clearAll" :disabled="!entries.length">
+            {{ t('history.clear_all') }}
+          </el-button>
+        </template>
       </div>
     </div>
 
     <el-empty v-if="!loading && !entries.length" :description="t('history.no_history_description')" />
 
     <div v-loading="loading" class="cards">
-      <div v-for="e in entries" :key="e.id" class="hist-card yts-card">
+      <div
+        v-for="e in entries"
+        :key="e.id"
+        class="hist-card yts-card"
+        :class="{ selectable: selectMode, 'is-selected': selectMode && isSelected(e) }"
+        @click="selectMode && toggleEntry(e)"
+      >
+        <el-checkbox
+          v-if="selectMode"
+          class="chk"
+          :model-value="isSelected(e)"
+          @click.stop
+          @change="toggleEntry(e)"
+        />
         <div class="thumb">
           <img v-if="e.thumbnail_url" :src="`/api/thumbnail?url=${encodeURIComponent(e.thumbnail_url)}`" loading="lazy" @error="onImgErr(e)" />
           <div v-else class="thumb-ph">{{ e.is_audio_only ? '🎵' : '📹' }}</div>
@@ -36,7 +59,7 @@
           <p class="meta">{{ e.channel || t('video_info.unknown_channel') }} · {{ t('history.downloaded_on') }} {{ fmtDate(e.download_date) }}</p>
           <p class="meta">{{ fmtSize(e.file_size) }}<span v-if="e.resolution"> · {{ e.resolution }}</span></p>
         </div>
-        <div class="ops">
+        <div class="ops" v-if="!selectMode">
           <el-button
             size="small"
             text
@@ -69,7 +92,7 @@ import { ref, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { listHistoryPage, deleteHistory, clearHistory } from '@/api/history'
+import { listHistoryPage, deleteHistory, deleteHistoryBatch, clearHistory } from '@/api/history'
 import { errText } from '@/api/http'
 import { useReveal } from '@/composables/useReveal'
 
@@ -83,7 +106,27 @@ const loading = ref(false)
 const page = ref(1)
 const pageSize = ref(20)
 const total = ref(0)
+// Multi-select mode: selected ids live in a Set so the selection survives
+// pagination and search refresh (module 2.1 multi-delete).
+const selectMode = ref(false)
+const selected = ref(new Set())
 let timer = null
+
+function toggleSelectMode() {
+  selectMode.value = !selectMode.value
+  if (!selectMode.value) selected.value = new Set() // exiting clears the selection
+}
+
+function toggleEntry(e) {
+  const s = new Set(selected.value)
+  if (s.has(e.id)) s.delete(e.id)
+  else s.add(e.id)
+  selected.value = s
+}
+
+function isSelected(e) {
+  return selected.value.has(e.id)
+}
 
 async function load() {
   loading.value = true
@@ -160,6 +203,24 @@ async function removeEntry(e) {
   load()
 }
 
+async function removeSelected() {
+  const ids = [...selected.value]
+  if (!ids.length) return
+  try {
+    await ElMessageBox.confirm(
+      t('web.history.remove_selected_confirm_message', { count: ids.length }),
+      t('web.history.remove_selected_confirm_title'),
+      { type: 'warning' }
+    )
+  } catch { return }
+  const res = await deleteHistoryBatch(ids)
+  selected.value = new Set()
+  ElMessage.success(t('web.history.selected_removed', { count: res.removed }))
+  // If the current page was fully emptied, step back one page.
+  if (entries.value.length === ids.length && page.value > 1) page.value--
+  load()
+}
+
 async function clearAll() {
   try {
     await ElMessageBox.confirm(t('history.clear_confirm_message'), t('history.clear_confirm_title'), { type: 'warning' })
@@ -178,6 +239,13 @@ onMounted(load)
 .toolbar .count { color: var(--yts-text-dim); font-size: 13px; margin-left: auto; }
 .cards { display: flex; flex-direction: column; gap: 12px; }
 .hist-card { display: flex; gap: 14px; align-items: center; margin-bottom: 0; padding: 12px; }
+.selectable { cursor: pointer; transition: border-color 0.15s; }
+.selectable:hover { border-color: var(--yts-primary, #f56c6c); }
+.is-selected {
+  border-color: var(--yts-primary, #f56c6c);
+  box-shadow: 0 0 0 1px var(--yts-primary, #f56c6c) inset;
+}
+.chk { flex: 0 0 auto; margin-right: 2px; }
 .thumb { flex: 0 0 160px; height: 90px; border-radius: 6px; overflow: hidden; background: #101214; display: flex; align-items: center; justify-content: center; }
 .thumb img { width: 100%; height: 100%; object-fit: cover; }
 .thumb-ph { font-size: 32px; opacity: 0.5; }

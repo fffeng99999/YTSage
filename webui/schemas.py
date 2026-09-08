@@ -101,6 +101,11 @@ class PlaylistExportRequest(BaseModel):
     title: Optional[str] = None
 
 
+class HistoryBatchDeleteRequest(BaseModel):
+    """Multi-select history delete (POST /api/history/batch-delete)."""
+    ids: List[str] = Field(default_factory=list, min_length=1)
+
+
 class RevealRequest(BaseModel):
     path: str
 
