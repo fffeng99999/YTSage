@@ -15,6 +15,11 @@ export function listJobs() {
   return api.get('/jobs').then((r) => r.data)
 }
 
+/** In-flight job snapshot for resync after refresh / reconnect (module 6.3). */
+export function activeTasks() {
+  return api.get('/tasks/active').then((r) => r.data)
+}
+
 export function getJob(jobId) {
   return api.get(`/jobs/${jobId}`).then((r) => r.data)
 }

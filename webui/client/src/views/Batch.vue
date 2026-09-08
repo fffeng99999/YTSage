@@ -141,34 +141,72 @@
           </div>
 
           <div class="action-row">
-            <el-input
-              v-model="chSearch"
-              :placeholder="t('web.channel.search_placeholder')"
-              clearable
-              style="width: 260px"
-            >
-              <template #prefix><el-icon><Search /></el-icon></template>
-            </el-input>
-            <el-button
-              type="danger"
-              :disabled="!channelSelected.length || !downloadPath || channelPumping"
-              :loading="channelPumping"
-              @click="startChannelDownload"
-            >
-              {{ t('web.batch.download_selected', { count: channelSelected.length }) }}
-            </el-button>
-            <el-button v-if="channelDone > 0" text @click="router.push('/jobs')">{{ t('web.batch.go_to_jobs') }}</el-button>
-            <span v-if="channelPumping" class="hint">{{ t('web.batch.progress', { done: channelDone, total: channelTotal }) }}</span>
-          </div>
-
-          <el-table
-            ref="channelTableRef"
-            :data="displayEntries"
-            max-height="480"
-            row-key="index"
-            @selection-change="onChannelSelChange"
+          <el-input
+            v-model="chSearch"
+            :placeholder="t('web.channel.search_placeholder')"
+            clearable
+            style="width: 260px"
           >
-            <el-table-column type="selection" width="42" reserve-selection />
+            <template #prefix><el-icon><Search /></el-icon></template>
+          </el-input>
+          <el-button :type="chFilterOpen ? 'primary' : ''" size="small" @click="chFilterOpen = !chFilterOpen">
+            {{ t('web.filter.title') }}
+          </el-button>
+          <el-button
+            type="danger"
+            :disabled="!channelSelected.length || !downloadPath || channelPumping"
+            :loading="channelPumping"
+            @click="startChannelDownload"
+          >
+            {{ t('web.batch.download_selected', { count: channelSelected.length }) }}
+          </el-button>
+          <el-button v-if="channelDone > 0" text @click="router.push('/jobs')">{{ t('web.batch.go_to_jobs') }}</el-button>
+          <span v-if="channelPumping" class="hint">{{ t('web.batch.progress', { done: channelDone, total: channelTotal }) }}</span>
+        </div>
+
+        <!-- Multi-dimensional filter panel (module 7.1) -->
+        <div v-if="chFilterOpen" class="filter-panel">
+          <div class="action-row" style="margin-top: 0">
+            <span class="lbl">{{ t('web.filter.include') }}</span>
+            <el-input v-model="chFilter.include" placeholder="regex" clearable style="width: 200px" size="small" />
+            <span class="lbl">{{ t('web.filter.exclude') }}</span>
+            <el-input v-model="chFilter.exclude" placeholder="regex" clearable style="width: 200px" size="small" />
+          </div>
+          <div class="action-row">
+            <span class="lbl">{{ t('web.filter.recent_days') }}</span>
+            <el-input-number v-model="chFilter.recentDays" :min="0" :max="36500" size="small" style="width: 120px" />
+            <span class="lbl">{{ t('web.filter.date_range') }}</span>
+            <el-date-picker
+              v-model="chFilter.dateRange"
+              type="daterange"
+              size="small"
+              value-format="x"
+              :start-placeholder="t('web.filter.from')"
+              :end-placeholder="t('web.filter.to')"
+              style="width: 240px"
+            />
+            <span class="lbl">{{ t('web.filter.max_count') }}</span>
+            <el-input-number v-model="chFilter.maxCount" :min="0" :max="100000" size="small" style="width: 120px" />
+          </div>
+          <div class="action-row">
+            <el-button size="small" @click="selectVisible(true)">{{ t('web.filter.select_all') }}</el-button>
+            <el-button size="small" @click="selectVisible(false)">{{ t('web.filter.select_none') }}</el-button>
+            <el-button size="small" @click="invertSelection">{{ t('web.filter.invert') }}</el-button>
+            <span class="hint">{{ t('web.filter.shown', { count: filteredEntries.length }) }}</span>
+            <span v-if="regexError" class="hint err">{{ regexError }}</span>
+          </div>
+        </div>
+
+        <el-table
+          ref="channelTableRef"
+          :data="channelRendered"
+          max-height="480"
+          row-key="index"
+          :row-class-name="spacerRowClass"
+          :row-style="spacerRowStyle"
+          @selection-change="onChannelSelChange"
+        >
+          <el-table-column type="selection" width="42" reserve-selection :selectable="(r) => !r.__spacer" />
             <el-table-column :label="t('web.channel.col_pos')" width="80">
               <template #default="{ row }">{{ row.index }}</template>
             </el-table-column>
@@ -629,6 +667,138 @@ const channelSelected = ref([])
 const searching = computed(() => !!chSearch.value.trim())
 const loadedCount = computed(() => loadedEntries.size)
 
+/* ---- Multi-dimensional filter panel (module 7.1) ---- */
+const chFilterOpen = ref(false)
+const chFilter = reactive({
+  include: '',
+  exclude: '',
+  recentDays: 0,
+  dateRange: null,
+  maxCount: 0,
+})
+
+function compileRegex(pat) {
+  if (!pat) return null
+  try { return new RegExp(pat, 'i') } catch { return undefined } // undefined = invalid pattern
+}
+const includeRe = computed(() => compileRegex(chFilter.include))
+const excludeRe = computed(() => compileRegex(chFilter.exclude))
+const regexError = computed(() => {
+  if (chFilter.include && includeRe.value === undefined) return `${t('web.filter.bad_regex')}: include`
+  if (chFilter.exclude && excludeRe.value === undefined) return `${t('web.filter.bad_regex')}: exclude`
+  return ''
+})
+
+const filterActive = computed(() =>
+  searching.value ||
+  !!chFilter.include || !!chFilter.exclude ||
+  chFilter.recentDays > 0 ||
+  !!(chFilter.dateRange && chFilter.dateRange.length === 2) ||
+  chFilter.maxCount > 0
+)
+
+function matchesFilter(entry) {
+  if (!matches(entry)) return false
+  const inc = includeRe.value
+  const exc = excludeRe.value
+  if (inc !== undefined && exc !== undefined) {
+    const title = entry.title || ''
+    if (inc && !inc.test(title)) return false
+    if (exc && exc.test(title)) return false
+  }
+  const days = chFilter.recentDays
+  const range = chFilter.dateRange
+  if (days > 0 || (range && range.length === 2)) {
+    const ts = entry.timestamp
+    // Date filtering needs a known upload time; entries without one are dropped.
+    if (!ts) return false
+    const tms = ts * 1000
+    if (days > 0 && tms < Date.now() - days * 86400000) return false
+    if (range && range.length === 2) {
+      if (tms < Number(range[0]) || tms > Number(range[1]) + 86399000) return false
+    }
+  }
+  return true
+}
+
+const filteredEntries = computed(() => {
+  let list = pageEntries.value
+  if (filterActive.value) {
+    // Selected rows are never hidden (pinned to top), same rule as search.
+    const selected = [...loadedEntries.values()]
+      .filter((e) => isChannelSelected(e.index))
+      .sort((a, b) => a.index - b.index)
+    const selSet = new Set(selected.map((e) => e.index))
+    const rest = list.filter((e) => !selSet.has(e.index) && matchesFilter(e))
+    list = [...selected, ...rest]
+    const max = chFilter.maxCount
+    if (max > 0 && list.length > max) {
+      // Truncate from the tail; selected rows always survive.
+      const sel = list.filter((e) => selSet.has(e.index))
+      const un = list.filter((e) => !selSet.has(e.index))
+      list = [...sel, ...un.slice(0, Math.max(0, max - sel.length))]
+    }
+  }
+  return list
+})
+
+function selectVisible(flag) {
+  for (const e of filteredEntries.value) {
+    if (e.dl_status && e.dl_status !== 'error') continue
+    channelTableRef.value?.toggleRowSelection(e, flag)
+  }
+}
+function invertSelection() {
+  for (const e of filteredEntries.value) {
+    if (e.dl_status && e.dl_status !== 'error') continue
+    channelTableRef.value?.toggleRowSelection(e, !isChannelSelected(e.index))
+  }
+}
+
+/* ---- Windowed rendering for big channel pages (module 6.1) ---- */
+// el-table has no built-in virtualization; for pages longer than a threshold
+// we render only the viewport rows plus two invisible spacer <tr>s that carry
+// the collapsed height. Below the threshold the table behaves exactly as
+// before (zero regression for typical 20-50 row pages).
+const ROW_H = 70
+const BUFFER = 6
+const WINDOW_THRESHOLD = 60
+const chScrollTop = ref(0)
+const chViewport = ref(480)
+
+function attachTableScroll() {
+  const el = channelTableRef.value?.$el
+  if (!el) return
+  const wrap = el.querySelector('.el-scrollbar__wrap')
+  if (!wrap || wrap.__ytsScroll) return
+  wrap.__ytsScroll = true
+  wrap.addEventListener('scroll', () => {
+    chScrollTop.value = wrap.scrollTop
+    chViewport.value = wrap.clientHeight || chViewport.value
+  })
+}
+
+const channelRendered = computed(() => {
+  const list = filteredEntries.value
+  if (list.length <= WINDOW_THRESHOLD) return list
+  const start = Math.max(0, Math.floor(chScrollTop.value / ROW_H) - BUFFER)
+  const end = Math.min(list.length, start + Math.ceil(chViewport.value / ROW_H) + BUFFER * 2)
+  const rows = []
+  if (start > 0) rows.push({ index: '__spacer_top', __spacer: true, __height: start * ROW_H })
+  rows.push(...list.slice(start, end))
+  if (end < list.length) rows.push({ index: '__spacer_bottom', __spacer: true, __height: (list.length - end) * ROW_H })
+  return rows
+})
+
+function spacerRowClass({ row }) {
+  return row.__spacer ? 'spacer-row' : ''
+}
+function spacerRowStyle({ row }) {
+  return row.__spacer ? { height: `${row.__height}px` } : {}
+}
+
+watch(channelRendered, () => { nextTick(attachTableScroll) })
+
 // displayEntries re-sorts (pins selected to top) based on selection, so guard
 // against a selection-change feedback loop (order-insensitive set compare).
 function onChannelSelChange(rows) {
@@ -650,18 +820,6 @@ function matches(entry) {
   if (!kw) return true
   return (entry.title || '').toLowerCase().includes(kw) || (entry.id || '').toLowerCase().includes(kw)
 }
-
-const displayEntries = computed(() => {
-  if (!searching.value) return pageEntries.value
-  // Selected videos stay visible and are pinned at the top; the rest of the
-  // page is filtered by the keyword. Selected rows are never hidden.
-  const selected = [...loadedEntries.values()]
-    .filter((e) => isChannelSelected(e.index))
-    .sort((a, b) => a.index - b.index)
-  const selSet = new Set(selected.map((e) => e.index))
-  const rest = pageEntries.value.filter((e) => !selSet.has(e.index) && matches(e))
-  return [...selected, ...rest]
-})
 
 const paginationTotal = computed(() => {
   const r = channelResult.value
@@ -697,6 +855,7 @@ async function loadChannelPage(page) {
     })
     channelResult.value = data
     chPage.value = data.page
+    chScrollTop.value = 0
     pageEntries.value = mergeEntries((data.entries || []).map((e) => ({ ...e, dl_status: '' })))
   } catch (e) {
     ElMessage.error(errText(e))
@@ -818,4 +977,8 @@ watch(() => settingsStore.downloadPath, (v) => { if (v && !downloadPath.value) d
 .cell-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 .cell-sub { color: var(--yts-text-dim); font-size: 12px; display: flex; gap: 6px; align-items: center; }
 .pager-row { margin-top: 12px; display: flex; align-items: center; gap: 12px; justify-content: center; }
+.filter-panel { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--el-border-color); border-radius: 8px; background: var(--yts-panel-2, rgba(255,255,255,0.02)); }
+.hint.err { color: var(--yts-red); }
+:deep(.spacer-row td) { padding: 0 !important; border: none !important; background: transparent !important; }
+:deep(.spacer-row) { visibility: hidden; }
 </style>

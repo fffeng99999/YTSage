@@ -24,6 +24,23 @@
           </template>
           <template v-else>
             <el-form label-width="160px">
+              <el-form-item :label="t('web.cookie_import_wizard')">
+                <!-- Drag-drop / click to load a cookies.txt into the editor below
+                     (module 7.2). Contents are validated + saved by "Apply". -->
+                <el-upload
+                  drag
+                  :auto-upload="false"
+                  :show-file-list="false"
+                  accept=".txt"
+                  :on-change="onCookieFile"
+                >
+                  <div class="upload-inner">
+                    <div class="upload-icon">📄</div>
+                    <div class="upload-text">{{ t('web.cookie_drop_hint') }}</div>
+                    <div class="upload-sub">{{ t('web.cookie_browse') }}</div>
+                  </div>
+                </el-upload>
+              </el-form-item>
               <el-form-item :label="t('web.cookie_content_label')">
                 <el-input
                   v-model="ck.file_content"
@@ -129,7 +146,7 @@ const tab = ref('cookies')
 const browsers = ['chrome', 'firefox', 'safari', 'edge', 'opera', 'brave', 'chromium', 'vivaldi']
 const ytdlpDocs = 'https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file#usage-and-options'
 
-const ck = ref({ source: 'browser', browser: 'chrome', profile: '', file_path: '', remember: true })
+const ck = ref({ source: 'browser', browser: 'chrome', profile: '', file_path: '', file_content: '', remember: true })
 const status = ref({ active: false, source: 'browser', detail: null })
 const cmd = ref({ command: '', url: '' })
 const px = ref({ proxy_url: '', geo_proxy_url: '' })
@@ -145,6 +162,22 @@ watch(commandText, async () => {
 
 function validProxy(v) {
   return /^(https?|socks5(_hostd)?|socks4):\/\//.test(v)
+}
+
+/** Cookie import wizard (module 7.2): read a dropped cookies.txt locally
+ * into the editor; validation + saving stay on the existing Apply path. */
+async function onCookieFile(uploadFile) {
+  const raw = uploadFile?.raw || uploadFile
+  if (!raw || typeof raw.text !== 'function') return
+  try {
+    const text = await raw.text()
+    if (!text.trim()) { ElMessage.warning(t('web.cookies_empty')); return }
+    ck.value.file_content = text
+    ck.value.source = 'file'
+    ElMessage.success(t('web.cookie_file_loaded', { name: raw.name || 'cookies.txt' }))
+  } catch (e) {
+    ElMessage.error(errText(e))
+  }
 }
 
 async function loadStatus() {
@@ -208,6 +241,10 @@ onMounted(async () => {
 .row { margin-top: 12px; display: flex; align-items: center; gap: 10px; }
 .doc-link { color: var(--yts-red); font-size: 13px; }
 :deep(.invalid .el-input__wrapper) { box-shadow: 0 0 0 1px var(--yts-red) inset; }
+.upload-inner { padding: 8px 0; }
+.upload-icon { font-size: 26px; }
+.upload-text { font-size: 13px; color: var(--yts-text); margin-top: 4px; }
+.upload-sub { font-size: 12px; color: var(--yts-text-dim); margin-top: 2px; }
 :deep(.el-tabs__item) { color: var(--yts-text-dim); }
 :deep(.el-tabs__item.is-active) { color: var(--yts-red); }
 :deep(.el-tabs__active-bar) { background-color: var(--yts-red); }

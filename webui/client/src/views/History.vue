@@ -11,7 +11,7 @@
           style="width: 280px"
           @input="debouncedLoad"
         />
-        <span class="count">{{ t('history.entries_count', { count: entries.length }) }}</span>
+        <span class="count">{{ t('history.entries_count', { count: total }) }}</span>
         <el-button size="small" type="danger" @click="clearAll" :disabled="!entries.length">
           {{ t('history.clear_all') }}
         </el-button>
@@ -37,11 +37,29 @@
           <p class="meta">{{ fmtSize(e.file_size) }}<span v-if="e.resolution"> · {{ e.resolution }}</span></p>
         </div>
         <div class="ops">
-          <el-button size="small" text @click="openLocation(e)" :title="t('history.open_location')">📁</el-button>
+          <el-button
+            size="small"
+            text
+            :title="local ? t('history.open_location') : t('web.env.download_file')"
+            @click="openLocation(e)"
+          >{{ local ? '📁' : '⬇️' }}</el-button>
           <el-button size="small" text @click="redownload(e)" :title="t('history.redownload')">⬇️</el-button>
           <el-button size="small" text @click="removeEntry(e)" :title="t('history.remove')">🗑️</el-button>
         </div>
       </div>
+    </div>
+
+    <!-- Server-side pagination (module 6.1): SQLite LIMIT/OFFSET -->
+    <div v-if="total > pageSize" class="pager-row">
+      <el-pagination
+        v-model:current-page="page"
+        :page-size="pageSize"
+        :total="total"
+        :pager-count="7"
+        layout="prev, pager, next, jumper"
+        background
+        @current-change="load"
+      />
     </div>
   </div>
 </template>
@@ -51,23 +69,28 @@ import { ref, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { listHistory, deleteHistory, clearHistory } from '@/api/history'
-import { revealPath } from '@/api/system'
+import { listHistoryPage, deleteHistory, clearHistory } from '@/api/history'
 import { errText } from '@/api/http'
+import { useReveal } from '@/composables/useReveal'
 
 const { t } = useI18n()
 const router = useRouter()
+const { local, reveal, directDownload } = useReveal()
 
 const entries = ref([])
 const query = ref('')
 const loading = ref(false)
+const page = ref(1)
+const pageSize = ref(20)
+const total = ref(0)
 let timer = null
 
 async function load() {
   loading.value = true
   try {
-    const data = await listHistory(query.value || undefined)
+    const data = await listHistoryPage(page.value, pageSize.value, query.value.trim() || undefined)
     entries.value = data.entries || []
+    total.value = data.total || 0
   } catch (e) {
     ElMessage.error(errText(e))
   } finally {
@@ -77,7 +100,10 @@ async function load() {
 
 function debouncedLoad() {
   clearTimeout(timer)
-  timer = setTimeout(load, 350)
+  timer = setTimeout(() => {
+    page.value = 1
+    load()
+  }, 350)
 }
 
 function fmtDate(d) {
@@ -102,15 +128,13 @@ function onImgErr(e) {
 }
 
 async function openLocation(e) {
-  try {
-    await revealPath(e.file_path)
-  } catch (err) {
-    ElMessageBox.alert(
-      t('history.file_not_found_message'),
-      t('history.file_not_found'),
-      { type: 'warning' }
-    ).catch(() => {})
+  // Remote: stream the file to the browser instead of popping the server's explorer
+  if (!local) {
+    if (!e.file_path) { ElMessage.warning(t('history.file_not_found')); return }
+    directDownload(e.file_path)
+    return
   }
+  await reveal(e.file_path)
 }
 
 async function redownload(e) {
@@ -142,6 +166,7 @@ async function clearAll() {
   } catch { return }
   await clearHistory()
   ElMessage.success(t('history.history_cleared'))
+  page.value = 1
   load()
 }
 
@@ -161,4 +186,5 @@ onMounted(load)
 .title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .meta { margin: 4px 0 0; color: var(--yts-text-dim); font-size: 12px; }
 .ops { display: flex; flex-direction: column; gap: 2px; }
+.pager-row { margin-top: 12px; display: flex; justify-content: center; }
 </style>

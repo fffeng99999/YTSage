@@ -24,7 +24,7 @@ from .official_bridge import (
     USER_HOME_DIR,
     cfg_get,
 )
-from .yt_dlp_finder import get_yt_dlp_path
+from .yt_dlp_finder import get_ffmpeg_path, get_yt_dlp_path
 
 logger = logging.getLogger("ytsage.webui")
 

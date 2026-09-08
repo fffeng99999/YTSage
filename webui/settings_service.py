@@ -124,6 +124,13 @@ SETTINGS_SCHEMA: Dict[str, Any] = {
     "default_video_quality": (_STR_OR_NONE, None),
     "default_subtitle_language": (_STR_OR_NONE, None),
     "codec_priority": (_codec_priority_or_none, list(DEFAULT_CODEC_PRIORITY)),
+    # Optional explicit binary paths (top of the finder resolution chain).
+    # Empty/None means "auto-detect" (env var -> app bin -> system PATH).
+    "ytdlp_path": (_STR_OR_NONE, None),
+    "ffmpeg_path": (_STR_OR_NONE, None),
+    # Network resilience defaults (module 7.3). 10 = yt-dlp's own default.
+    "download_retries": (_int_range(0, 100), 10),
+    "fragment_retries": (_int_range(0, 100), 10),
 }
 
 PUBLIC_KEYS = list(SETTINGS_SCHEMA.keys())

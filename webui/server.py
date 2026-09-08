@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -56,7 +57,7 @@ from .schemas import (
 )
 from .settings_service import build_download_defaults, get_all_settings, update_settings
 from .thumbnail_service import fetch_thumbnail
-from .url_utils import validate_video_url
+from .url_utils import strip_control_chars, validate_video_url
 from .yt_dlp_finder import get_yt_dlp_path
 
 # Standard logging (no loguru dependency)
@@ -100,6 +101,25 @@ async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] =
     if payload is None:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     return payload
+
+
+async def get_user_allow_query_token(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
+):
+    """Auth for browser-initiated navigations (direct file download links):
+    the Authorization header cannot be set by <a>/window.open, so a signed
+    token may also arrive as a ?token= query parameter."""
+    if credentials is not None:
+        payload = verify_token(credentials.credentials)
+        if payload is not None:
+            return payload
+    token = request.query_params.get("token")
+    if token:
+        payload = verify_token(token)
+        if payload is not None:
+            return payload
+    raise HTTPException(status_code=401, detail="Not authenticated")
 
 
 def _ensure_not_updating() -> None:
@@ -292,6 +312,11 @@ async def start_download(req: DownloadRequest, auth: dict = Depends(get_current_
                 "preferred_audio_format", "audio_normalization"):
         if data.get(key) is None:
             data[key] = defaults[key]
+    # Retries: fall back to the global settings when the client omitted them.
+    if data.get("retries") is None:
+        data["retries"] = cfg_get("download_retries")
+    if data.get("fragment_retries") is None:
+        data["fragment_retries"] = cfg_get("fragment_retries")
     try:
         job_id = await download_manager.start_download(data)
         return {"job_id": job_id}
@@ -362,10 +387,22 @@ async def settings_update(data: Dict[str, Any], auth: dict = Depends(get_current
 # ---------------------------------------------------------------------------
 
 @app.get("/api/history")
-async def history_list(q: Optional[str] = Query(None), auth: dict = Depends(get_current_user)):
+async def history_list(
+    q: Optional[str] = Query(None),
+    page: Optional[int] = Query(None, ge=1),
+    limit: Optional[int] = Query(None, ge=1, le=200),
+    keyword: Optional[str] = Query(None),
+    auth: dict = Depends(get_current_user),
+):
+    """History list. With page/limit params -> paged query (SQLite LIMIT).
+    Without them -> legacy full list (backward compatible with old clients)."""
+    if page is not None or limit is not None:
+        return await history_service.list_paged(
+            page=page or 1, limit=limit or 20, keyword=keyword or q
+        )
     if not HAS_HISTORY:
         return {"entries": [], "available": False}
-    entries = await history_service.list_entries(q)
+    entries = await history_service.list_entries(keyword or q)
     return {"entries": entries, "available": True}
 
 
@@ -461,6 +498,28 @@ async def system_open_logs(auth: dict = Depends(get_current_user)):
     return {"ok": True}
 
 
+@app.get("/api/download-file")
+async def download_file(
+    path: str = Query(...),
+    auth: dict = Depends(get_user_allow_query_token),
+):
+    """Direct file download for remote clients (module 6.2): streams a file
+    that lives inside the server's whitelisted roots (download dir + APP dirs)
+    to the browser, replacing the local-only "reveal in folder" action."""
+    from mimetypes import guess_type
+    from urllib.parse import quote
+
+    p = Path(path)
+    if not p.is_file() or not await asyncio.to_thread(system_service.is_path_allowed, p):
+        raise HTTPException(status_code=404, detail="File not found or path not allowed")
+    media_type = guess_type(p.name)[0] or "application/octet-stream"
+    return FileResponse(
+        str(p),
+        media_type=media_type,
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(p.name)}"},
+    )
+
+
 # ---------------------------------------------------------------------------
 # Cookies (CustomOptionsDialog parity)
 # ---------------------------------------------------------------------------
@@ -477,13 +536,9 @@ async def cookies_status(auth: dict = Depends(get_current_user)):
             browser = cfg_get("cookie_browser") or "chrome"
             profile = cfg_get("cookie_browser_profile") or ""
             detail = f"{browser}:{profile}" if profile else browser
-    return {"active": active, "source": source, "detail": detail}
-
-
-@app.get("/api/cookies/content")
-async def cookies_content(auth: dict = Depends(get_current_user)):
-    """Return the saved cookie text (for prefilling the Tools page)."""
-    return {"content": await asyncio.to_thread(cookie_store.load_cookie_content)}
+    # Metadata only (module 4.3): never include cookie contents.
+    file_info = await asyncio.to_thread(cookie_store.cookie_status)
+    return {"active": active, "source": source, "detail": detail, "file": file_info}
 
 
 @app.post("/api/cookies/apply")
@@ -522,8 +577,10 @@ async def cookies_clear(auth: dict = Depends(get_current_user)):
 @app.post("/api/command/run")
 async def command_run(req: CommandRunRequest, auth: dict = Depends(get_current_user)):
     _ensure_not_updating()
+    command = strip_control_chars(req.command or "")
+    url = strip_control_chars(req.url) if req.url else None
     path = req.path or await asyncio.to_thread(system_service.get_download_path)
-    exec_id = await command_service.run(req.command, req.url, path)
+    exec_id = await command_service.run(command, url, path)
     return {"exec_id": exec_id}
 
 
@@ -659,14 +716,26 @@ async def health():
     except Exception as e:
         ytdlp_version = f"error: {e}"
 
+    # Structured environment-missing report (module 3.2): never raises,
+    # lets the frontend show a friendly banner instead of a dead backend.
+    from .yt_dlp_finder import missing_binaries
+    missing = await asyncio.to_thread(missing_binaries)
+
     return {
-        "status": "ok",
+        "status": "ok" if not missing else "degraded",
         "app_version": APP_VERSION,
         "ytdlp_path": str(ytdlp_path),
         "ytdlp_version": ytdlp_version,
         "official_available": HAS_CONFIG,
         "history_available": HAS_HISTORY,
+        "missing_binaries": missing,
     }
+
+
+@app.get("/api/tasks/active")
+async def tasks_active(auth: dict = Depends(get_current_user)):
+    """Snapshot of in-flight jobs for resync after refresh/reconnect."""
+    return {"jobs": download_manager.active_jobs()}
 
 
 # ---------------------------------------------------------------------------
@@ -683,24 +752,38 @@ async def websocket_endpoint(ws: WebSocket):
 
     await ws.accept()
     q = bus.subscribe()
+    done = asyncio.Event()
 
     async def _pump() -> None:
         try:
-            while True:
-                event = await q.get()
+            while not done.is_set():
+                try:
+                    event = await asyncio.wait_for(q.get(), timeout=30)
+                except asyncio.TimeoutError:
+                    # Liveness probe; a dead socket surfaces as a send error.
+                    await ws.send_json({"type": "ping"})
+                    continue
                 await ws.send_json(event)
         except Exception:
             pass
+        finally:
+            # Send side died -> unblock the receive loop so the subscriber
+            # queue is always released (no long-lived leak on half-open WS).
+            done.set()
 
     pump = asyncio.create_task(_pump())
     try:
-        async for _ in ws.iter_text():
-            pass
+        while not done.is_set():
+            try:
+                await asyncio.wait_for(ws.receive_text(), timeout=45)
+            except asyncio.TimeoutError:
+                continue
     except WebSocketDisconnect:
         pass
     except Exception:
         pass
     finally:
+        done.set()
         pump.cancel()
         bus.unsubscribe(q)
 
@@ -762,6 +845,11 @@ async def serve_static(full_path: str):
 @app.on_event("startup")
 async def startup_hooks():
     """Auto-update check in background (official: _perform_startup_checks)."""
+    # WAL + busy_timeout on the shared history DB (module 2.1).
+    try:
+        await asyncio.to_thread(history_service.ensure_wal_mode)
+    except Exception as e:
+        logger.warning(f"[WebUI] history WAL init failed: {e}")
     asyncio.create_task(_auto_update_hook())
 
 
@@ -782,8 +870,33 @@ async def _auto_update_hook():
 def main():
     """Run the server directly: python -m webui.server"""
     import uvicorn
+    from .auth import security_state
+
     host = os.environ.get("YTSAGE_WEBUI_HOST", "0.0.0.0")
     port = int(os.environ.get("YTSAGE_WEBUI_PORT", "8765"))
+
+    # LAN security policy (module 4.3): default password + non-loopback bind
+    # is refused when YTSAGE_REQUIRE_CUSTOM_PASSWORD is set; otherwise we
+    # start but shout about it.
+    state = security_state(host)
+    if state["lan_exposed"] and state["default_password"]:
+        if state["require_custom_password"]:
+            logger.error(
+                "Refusing to bind %s with the DEFAULT password while "
+                "YTSAGE_REQUIRE_CUSTOM_PASSWORD is set. Set a custom password "
+                "first (Settings -> Change Password) or unset the env var.",
+                host,
+            )
+            sys.exit(1)
+        logger.warning(
+            "=" * 72 + "\n"
+            "  SECURITY WARNING: listening on %s (LAN-reachable) with the\n"
+            "  DEFAULT password. Anyone on the network can download with your\n"
+            "  identity. Change the password in Settings now, or run with\n"
+            "  YTSAGE_REQUIRE_CUSTOM_PASSWORD=1 to make this fatal.\n"
+            + "=" * 72,
+            host,
+        )
     logger.info(f"Starting YTSage Web UI on http://{host}:{port}")
     uvicorn.run("webui.server:app", host=host, port=port, reload=False)
 

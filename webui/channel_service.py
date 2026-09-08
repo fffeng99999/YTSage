@@ -165,6 +165,9 @@ def analyze_channel(
             "url": e.get("url") or (f"https://www.youtube.com/watch?v={e.get('id')}" if e.get("id") else None),
             "duration": e.get("duration"),
             "thumbnail": _entry_thumbnail(e),
+            # Upload timestamp (flat-playlist entries carry it when known);
+            # powers the date-range filter on the channel page (module 7.1).
+            "timestamp": e.get("timestamp"),
         })
 
     # playlist_count = true total when the extractor knows it (channel tabs do)

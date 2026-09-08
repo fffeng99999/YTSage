@@ -26,7 +26,7 @@
         <el-button v-if="j.status === 'running'" size="small" @click="pause(j)">{{ t('buttons.pause') }}</el-button>
         <el-button v-if="j.status === 'paused'" size="small" type="warning" @click="resume(j)">{{ t('buttons.resume') }}</el-button>
         <el-button v-if="['running','paused','pending','queued'].includes(j.status)" size="small" type="danger" @click="cancel(j)">{{ t('buttons.cancel') }}</el-button>
-        <el-button v-if="j.status === 'completed' && j.last_file_path" size="small" @click="reveal(j.last_file_path)">📁</el-button>
+        <el-button v-if="j.status === 'completed' && j.last_file_path" size="small" :title="local ? t('history.open_location') : t('web.env.download_file')" @click="reveal(j.last_file_path)">{{ local ? '📁' : '⬇️' }}</el-button>
         <el-button v-if="!['running','pending','queued'].includes(j.status)" size="small" text @click="remove(j)">{{ t('history.remove') }}</el-button>
       </div>
     </div>
@@ -44,7 +44,7 @@ import { useReveal } from '@/composables/useReveal'
 
 const { t } = useI18n()
 const store = useDownloadStore()
-const { reveal } = useReveal()
+const { reveal, local } = useReveal()
 const filter = ref('')
 
 const filtered = computed(() => {

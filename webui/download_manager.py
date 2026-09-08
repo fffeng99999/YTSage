@@ -20,8 +20,11 @@ import asyncio
 import gc
 import locale
 import logging
+import os
 import re
 import shlex
+import signal
+import subprocess
 import sys
 import time
 import uuid
@@ -149,6 +152,9 @@ class DownloadJob:
     last_file_path: Optional[str] = None
     error: Optional[str] = None
     error_key: Optional[str] = None
+    # Structured machine-readable error label (BOT_VERIFICATION / GEO_BLOCKED /
+    # PRIVATE_VIDEO / DISK_FULL / ...). Additive to error_key (i18n message key).
+    error_code: Optional[str] = None
     speed: str = ""
     eta: str = ""
     stage: str = ""
@@ -318,6 +324,18 @@ def build_ytdlp_command(job: DownloadJob) -> List[str]:
     if job.rate_limit:
         cmd.extend(["-r", job.rate_limit])
 
+    # --- Retries (module 7.3) ---
+    if job.retries is not None:
+        try:
+            cmd.extend(["--retries", str(max(0, min(100, int(job.retries))))])
+        except (TypeError, ValueError):
+            pass
+    if job.fragment_retries is not None:
+        try:
+            cmd.extend(["--fragment-retries", str(max(0, min(100, int(job.fragment_retries))))])
+        except (TypeError, ValueError):
+            pass
+
     # --- Download section ---
     if job.download_section:
         cmd.extend(["--download-sections", job.download_section])
@@ -366,12 +384,21 @@ def cleanup_partial_files(path: str) -> None:
     """
     try:
         pattern = re.compile(r"\.f\d+\.")
+        # yt-dlp / ffmpeg intermediate artifacts: .part, .ytdl (incomplete
+        # merge target), *.temp (ffmpeg concat output), .f<digits>. fragments.
+        temp_suffixes = {".part", ".ytdl", ".temp"}
         base = Path(path)
         if not base.exists():
             return
         for file_path in base.rglob("*"):
-            if file_path.is_file() and (file_path.suffix == ".part" or pattern.search(file_path.name)):
-                _safe_delete_with_retry(file_path)
+            try:
+                if not file_path.is_file():
+                    continue
+                if file_path.suffix in temp_suffixes or pattern.search(file_path.name):
+                    _safe_delete_with_retry(file_path)
+            except OSError:
+                # File vanished mid-walk (process still draining) - ignore.
+                continue
     except Exception as e:
         logger.warning(f"[WebUI] partial cleanup error: {e}")
 
@@ -464,6 +491,7 @@ class DownloadManager:
             "last_file_path": job.last_file_path,
             "speed": job.speed,
             "eta": job.eta,
+            "error_code": job.error_code,
             "stage": job.stage,
             "error": job.error,
             "error_key": job.error_key,
@@ -476,6 +504,18 @@ class DownloadManager:
             "thumbnail_url": job.thumbnail_url,
             "history_id": job.history_id,
         }
+
+    def active_jobs(self) -> List[Dict[str, Any]]:
+        """Snapshot of in-flight jobs (queued/pending/running/paused).
+
+        Used by GET /api/tasks/active so the frontend can resync after a page
+        refresh or WebSocket reconnect without waiting for the next event.
+        """
+        return [
+            self._job_to_dict(j)
+            for j in self._jobs.values()
+            if j.status in ("queued", "pending", "running", "paused")
+        ]
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -562,7 +602,12 @@ class DownloadManager:
 
     @staticmethod
     async def _terminate_process_tree(process: asyncio.subprocess.Process) -> None:
-        """Official: _terminate_process_tree (ytsage_downloader.py L160-205)."""
+        """Official: _terminate_process_tree (ytsage_downloader.py L160-205).
+
+        Windows: taskkill /F /T kills the whole tree (yt-dlp -> ffmpeg).
+        POSIX: SIGTERM the process group, escalate to SIGKILL after a grace
+        period so ffmpeg children cannot survive the parent's death.
+        """
         pid = process.pid
         try:
             if sys.platform == "win32":
@@ -574,14 +619,30 @@ class DownloadManager:
                 )
                 await asyncio.wait_for(proc.wait(), timeout=10)
             else:
-                import os
-                import signal
                 try:
-                    os.killpg(os.getpgid(pid), signal.SIGTERM)
-                    await asyncio.sleep(0.5)
-                    os.killpg(os.getpgid(pid), signal.SIGKILL)
+                    pgid = os.getpgid(pid)
                 except (ProcessLookupError, PermissionError):
-                    pass
+                    pgid = None
+                if pgid is not None:
+                    try:
+                        os.killpg(pgid, signal.SIGTERM)
+                    except (ProcessLookupError, PermissionError):
+                        pgid = None
+                if pgid is not None:
+                    # Grace period for a clean shutdown, then force-kill the group.
+                    try:
+                        await asyncio.wait_for(process.wait(), timeout=2.0)
+                    except (asyncio.TimeoutError, Exception):
+                        pass
+                    try:
+                        os.killpg(pgid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+                else:
+                    try:
+                        process.kill()
+                    except Exception:
+                        pass
         except Exception as e:
             logger.warning(f"[WebUI] terminate tree failed: {e}")
             try:
@@ -605,7 +666,11 @@ class DownloadManager:
             "stderr": asyncio.subprocess.STDOUT,
         }
         if sys.platform == "win32":
-            kwargs["creationflags"] = SUBPROCESS_CREATIONFLAGS
+            # CREATE_NEW_PROCESS_GROUP isolates the tree so taskkill /T can
+            # take down yt-dlp AND its ffmpeg children without killing us.
+            kwargs["creationflags"] = (
+                SUBPROCESS_CREATIONFLAGS | subprocess.CREATE_NEW_PROCESS_GROUP
+            )
         else:
             kwargs["start_new_session"] = True  # own process group for killpg
 
@@ -752,13 +817,15 @@ class DownloadManager:
         now = time.time()
         dirty = False
 
-        # Error capture -> friendly i18n key
+        # Error capture -> friendly i18n key + structured code
         if "ERROR:" in line:
-            from .url_utils import parse_yt_dlp_error_key
+            from .url_utils import parse_yt_dlp_error_key, classify_error_code
             key, params = parse_yt_dlp_error_key(line)
             if not job.error:
                 job.error = line.split("ERROR:", 1)[1].strip()
                 job.error_key = key
+                job.error_code = classify_error_code(line)
+                logger.error(f"[WebUI] job {job.job_id} failed [{job.error_code}]: {line}")
             dirty = True
 
         # Already downloaded (file_exists)
@@ -779,13 +846,27 @@ class DownloadManager:
             job.last_file_path = filepath
             dirty = True
 
-        # Merging
-        merger_match = re.search(r'Merging formats into "(.*?)"', line)
-        if merger_match:
-            job.last_file_path = merger_match.group(1)
-            job.current_filename = Path(merger_match.group(1)).name
+        # Merging / post-processing stage machine.
+        # Existing stage values (merging/sponsorblock/cleanup/finished/
+        # subtitles/audio_convert) are kept for the current frontend; the
+        # finer-grained machine adds post_processing and parsing markers.
+        if re.search(r"\[(Merger|ffmpeg)\].*(Merging formats into|Destination:)", line):
+            merger_match = re.search(r'Merging formats into "(.*?)"', line)
+            if merger_match:
+                job.last_file_path = merger_match.group(1)
+                job.current_filename = Path(merger_match.group(1)).name
+            else:
+                dest_m = re.search(r"Destination:\s*(.*)", line)
+                if dest_m:
+                    job.last_file_path = dest_m.group(1).strip()
+                    job.current_filename = Path(job.last_file_path).name
             job.stage = "merging"
             job.progress = 95.0
+            dirty = True
+        elif re.search(r"\[(FFmpegVideoRemuxer|FFmpegVideoConvertor|EmbedSubtitle|EmbedThumbnail|Metadata|ModifyChapters)\]", line):
+            job.stage = "post_processing"
+            if job.progress < 96.0:
+                job.progress = 96.0
             dirty = True
         elif "SponsorBlock" in line and "Removing" in line:
             job.stage = "sponsorblock"
@@ -826,6 +907,8 @@ class DownloadManager:
             job.stage = "subtitles"
         elif "[ExtractAudio]" in line:
             job.stage = "audio_convert"
+        elif "Extracting URL" in line and job.stage in ("", "parsing"):
+            job.stage = "parsing"
 
         if dirty:
             throttled.publish(

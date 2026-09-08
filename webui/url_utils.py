@@ -12,6 +12,21 @@ the same language files the desktop app uses.
 from typing import Tuple
 from urllib.parse import urlparse
 
+import re as _re
+
+# C0/C1 control chars + NUL + DEL. yt-dlp receives every argument as an argv
+# array (never shell=True), but control characters in a filename template or
+# URL can still smuggle newlines into logs/ANSI terminals, so we strip them
+# at the API boundary.
+_CONTROL_CHARS = _re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+
+def strip_control_chars(value: str) -> str:
+    """Remove control characters (\\n, \\r, \\0, etc.) from user input."""
+    if not isinstance(value, str):
+        return value
+    return _CONTROL_CHARS.sub("", value).replace("\r", "").replace("\n", "")
+
 # Mirrors official parse_yt_dlp_error keyword table (ytsage_utils.py L677-732)
 _ERROR_RULES = [
     (("private video", "login_required", "sign in if you"), "ytdlp_errors.private_video"),
@@ -71,6 +86,65 @@ def parse_yt_dlp_error_key(error_message: str) -> Tuple[str, dict]:
         if any(kw in error_str for kw in keywords):
             return key, {}
     return "ytdlp_errors.generic_error", {"error": error_message}
+
+
+# Structured error codes for machine-readable handling (module 5.3).
+# Checked in order; first match wins. Keys are stable API contract labels,
+# independent of i18n evolution.
+_ERROR_CODE_RULES = [
+    (("no space left on device", "not enough disk space", "disk full"), "DISK_FULL"),
+    (
+        (
+            "http error 429", "too many requests", "sign in to confirm",
+            "not a bot", "captcha", "bot verification",
+        ),
+        "BOT_VERIFICATION",
+    ),
+    (
+        (
+            "not available in your country", "geo-blocked", "geo restricted",
+            "video is not available in your country",
+        ),
+        "GEO_BLOCKED",
+    ),
+    (
+        (
+            "private video", "members-only", "members only",
+            "this video is private", "login required",
+        ),
+        "PRIVATE_VIDEO",
+    ),
+    (
+        (
+            "video unavailable", "has been removed", "does not exist",
+            "no longer available",
+        ),
+        "VIDEO_UNAVAILABLE",
+    ),
+    (
+        (
+            "network error", "connection", "timed out", "timeout",
+            "unable to download", "getaddrinfo failed", "temporary failure",
+        ),
+        "NETWORK",
+    ),
+    (
+        (
+            "ffmpeg", "postprocessing", "conversion failed",
+            "error opening input files", "result too large",
+        ),
+        "POSTPROCESSING",
+    ),
+]
+
+
+def classify_error_code(error_message: str) -> str:
+    """Map a raw error line to a stable structured code (or GENERIC)."""
+    error_str = (error_message or "").lower()
+    for keywords, code in _ERROR_CODE_RULES:
+        if any(kw in error_str for kw in keywords):
+            return code
+    return "GENERIC"
 
 
 # Mirrors official validate_video_url (ytsage_utils.py L735)

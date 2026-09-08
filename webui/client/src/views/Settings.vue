@@ -20,6 +20,16 @@
                 <el-input-number v-model="form.max_concurrent_downloads" :min="1" :max="10" />
               </el-tooltip>
             </el-form-item>
+            <el-form-item :label="t('web.retries')">
+              <el-tooltip :content="t('web.retries_help')" placement="top">
+                <el-input-number v-model="form.download_retries" :min="0" :max="100" />
+              </el-tooltip>
+            </el-form-item>
+            <el-form-item :label="t('web.fragment_retries')">
+              <el-tooltip :content="t('web.fragment_retries_help')" placement="top">
+                <el-input-number v-model="form.fragment_retries" :min="0" :max="100" />
+              </el-tooltip>
+            </el-form-item>
             <el-form-item :label="t('settings.generic_mode')">
               <el-tooltip :content="t('settings.generic_mode_help')" placement="top">
                 <el-switch v-model="form.generic_mode" />

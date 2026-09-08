@@ -4,7 +4,7 @@
  */
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { listJobs } from '@/api/download'
+import { listJobs, activeTasks } from '@/api/download'
 import { useSettingsStore } from '@/stores/settings'
 
 export const useDownloadStore = defineStore('download', () => {
@@ -12,6 +12,10 @@ export const useDownloadStore = defineStore('download', () => {
   const ws = ref(null)
   const connected = ref(false)
   const reconnectTimer = ref(null)
+  // Exponential backoff state (module 6.3): 1s -> 2s -> 4s ... capped at 30s
+  const reconnectDelay = ref(1000)
+  const RECONNECT_MAX = 30000
+  let manualClose = false
 
   // Custom command console (Tools page)
   const commandLines = ref([])
@@ -27,6 +31,28 @@ export const useDownloadStore = defineStore('download', () => {
       jobs.value = data.jobs || []
     } catch (e) {
       console.error('fetchJobs error:', e)
+    }
+  }
+
+  /**
+   * Resync after page load / WS (re)connect (module 6.3): pull the in-flight
+   * snapshot and merge it in. Any locally-known job still marked in-flight but
+   * absent from the snapshot finished (or was removed) while we were offline,
+   * so fall back to the full list once to reconcile.
+   */
+  async function fetchActiveJobs() {
+    try {
+      const data = await activeTasks()
+      const snapshot = data.jobs || []
+      const ids = new Set(snapshot.map((j) => j.job_id))
+      for (const job of snapshot) updateJob({ job })
+      const stale = jobs.value.some(
+        (j) => ['pending', 'queued', 'running', 'paused'].includes(j.status) && !ids.has(j.job_id)
+      )
+      if (stale) await fetchJobs()
+    } catch (e) {
+      console.error('fetchActiveJobs error:', e)
+      fetchJobs()
     }
   }
 
@@ -89,12 +115,15 @@ export const useDownloadStore = defineStore('download', () => {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
     const url = `${proto}//${location.host}/ws?token=${encodeURIComponent(token)}`
 
+    manualClose = false
     try {
       ws.value = new WebSocket(url)
 
       ws.value.onopen = () => {
         connected.value = true
-        fetchJobs()
+        reconnectDelay.value = 1000 // reset backoff after a healthy link
+        // Resync: refresh may have missed job events while disconnected.
+        fetchActiveJobs()
       }
 
       ws.value.onmessage = (evt) => {
@@ -108,8 +137,11 @@ export const useDownloadStore = defineStore('download', () => {
       ws.value.onclose = () => {
         connected.value = false
         ws.value = null
+        if (manualClose) return // explicit disconnect: don't auto-reconnect
         if (reconnectTimer.value) clearTimeout(reconnectTimer.value)
-        reconnectTimer.value = setTimeout(connectWebSocket, 3000)
+        const delay = reconnectDelay.value
+        reconnectDelay.value = Math.min(delay * 2, RECONNECT_MAX)
+        reconnectTimer.value = setTimeout(connectWebSocket, delay)
       }
 
       ws.value.onerror = () => {
@@ -121,6 +153,7 @@ export const useDownloadStore = defineStore('download', () => {
   }
 
   function disconnectWebSocket() {
+    manualClose = true
     if (reconnectTimer.value) {
       clearTimeout(reconnectTimer.value)
       reconnectTimer.value = null

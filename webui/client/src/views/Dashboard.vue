@@ -187,7 +187,7 @@ const route = useRoute()
 const store = useAnalysisStore()
 const downloadStore = useDownloadStore()
 const settingsStore = useSettingsStore()
-const { reveal } = useReveal()
+const { reveal, local } = useReveal()
 
 const url = useSessionRef('ytsage_session_dash_url', '')
 const downloadPath = ref('')
@@ -235,8 +235,10 @@ const statusText = computed(() => {
       return j.error_key ? t(j.error_key, { error: j.error }) : (j.error || t('download.completed'))
     case 'running':
       if (j.stage === 'merging') return t('download.merging_formats')
+      if (j.stage === 'post_processing') return t('web.stage.post_processing')
       if (j.stage === 'sponsorblock') return t('download.removing_sponsor_segments')
       if (j.stage === 'subtitles') return t('download.downloading_subtitle')
+      if (j.stage === 'parsing') return t('web.stage.parsing')
       return t('download.downloading')
     default: return t('download.preparing')
   }

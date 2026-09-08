@@ -45,7 +45,11 @@ class CommandService:
             "stderr": asyncio.subprocess.STDOUT,
         }
         if sys.platform == "win32":
-            kwargs["creationflags"] = SUBPROCESS_CREATIONFLAGS
+            kwargs["creationflags"] = (
+                SUBPROCESS_CREATIONFLAGS | subprocess.CREATE_NEW_PROCESS_GROUP
+            )
+        else:
+            kwargs["start_new_session"] = True  # own process group for killpg
 
         bus.publish({"type": "command_output", "exec_id": exec_id, "line": " ".join(cmd)})
         bus.publish({"type": "command_output", "exec_id": exec_id, "line": "=" * 50})
@@ -90,33 +94,50 @@ class CommandService:
         proc = self._procs.get(exec_id)
         if not proc or proc.returncode is not None:
             return False
-        _kill_tree(proc.pid)
+        await _kill_tree_async(proc)
         return True
 
     def active_count(self) -> int:
         return len(self._procs)
 
 
-def _kill_tree(pid: int) -> None:
-    """Official: ytsage_downloader._terminate_process_tree (L160-205)."""
+async def _kill_tree_async(proc: asyncio.subprocess.Process) -> None:
+    """Kill yt-dlp and any ffmpeg children. POSIX: SIGTERM the group, then
+    escalate to SIGKILL after a grace period (was SIGTERM-only before)."""
+    pid = proc.pid
     try:
         if sys.platform == "win32":
-            subprocess_run = asyncio.create_subprocess_exec(
+            killer = await asyncio.create_subprocess_exec(
                 "taskkill", "/F", "/T", "/PID", str(pid),
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
                 creationflags=SUBPROCESS_CREATIONFLAGS,
             )
-            asyncio.create_task(subprocess_run)
-        else:
-            import os
-            import signal
             try:
-                os.killpg(os.getpgid(pid), signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
+                await asyncio.wait_for(killer.wait(), timeout=10)
+            except asyncio.TimeoutError:
                 pass
+        else:
+            try:
+                pgid = os.getpgid(pid)
+                os.killpg(pgid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pgid = None
+            if pgid is not None:
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=2.0)
+                except (asyncio.TimeoutError, Exception):
+                    pass
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
     except Exception as e:
         logger.warning(f"[WebUI] kill tree failed: {e}")
+        try:
+            proc.kill()
+        except Exception:
+            pass
 
 
 command_service = CommandService()

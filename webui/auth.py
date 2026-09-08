@@ -38,8 +38,10 @@ def _load_config() -> dict:
 
 def _save_config(cfg: dict) -> None:
     _ensure_config_dir()
-    with open(WEBUI_CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2)
+    # Lazy import: file_utils is standalone, but keep module load order flat.
+    from .file_utils import write_json_atomic
+
+    write_json_atomic(WEBUI_CONFIG_FILE, cfg)
 
 
 def get_password_hash() -> str:
@@ -63,6 +65,29 @@ def verify_password(password: str) -> bool:
     """Verify a password against stored hash."""
     stored = get_password_hash()
     return _hash_password(password) == stored
+
+
+def is_default_password() -> bool:
+    """True when no custom password has been set yet (DEFAULT_PASSWORD active)."""
+    return get_password_hash() == _hash_password(DEFAULT_PASSWORD)
+
+
+LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def host_is_loopback(host: str) -> bool:
+    return (host or "").strip() in LOOPBACK_HOSTS
+
+
+def security_state(host: str) -> dict:
+    """Public summary used for the LAN warning banner (no secrets exposed)."""
+    return {
+        "default_password": is_default_password(),
+        "lan_exposed": not host_is_loopback(host),
+        "require_custom_password": os.environ.get(
+            "YTSAGE_REQUIRE_CUSTOM_PASSWORD", ""
+        ).lower() in ("1", "true", "yes"),
+    }
 
 
 def _get_secret() -> str:

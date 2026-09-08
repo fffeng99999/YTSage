@@ -83,6 +83,9 @@ class DownloadRequest(BaseModel):
     audio_normalization: Optional[bool] = None
     filename_format: Optional[str] = None
     concurrent_fragments: Optional[int] = None
+    # Network resilience (module 7.3): None -> use global settings.
+    retries: Optional[int] = None
+    fragment_retries: Optional[int] = None
     # Metadata for history entries (official writes history from video_info)
     title: Optional[str] = None
     channel: Optional[str] = None
