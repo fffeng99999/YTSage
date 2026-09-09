@@ -38,6 +38,51 @@ const routes = [
       { path: 'settings', name: 'Settings', component: () => import('@/views/Settings.vue') },
       { path: 'tools', name: 'Tools', component: () => import('@/views/Tools.vue') },
       { path: 'updater', name: 'Updater', component: () => import('@/views/Updater.vue') },
+      {
+        path: 'sync',
+        name: 'Sync Overview',
+        component: () => import('@/views/sync/SyncOverview.vue'),
+      },
+      {
+        path: 'sync/dashboard',
+        name: 'Sync Dashboard',
+        component: () => import('@/views/sync/SyncDashboard.vue'),
+      },
+      {
+        path: 'sync/sources',
+        name: 'Sync Sources',
+        component: () => import('@/views/sync/SyncSources.vue'),
+      },
+      {
+        path: 'sync/subscriptions',
+        name: 'Sync Subscriptions',
+        component: () => import('@/views/sync/SyncSubscriptions.vue'),
+      },
+      {
+        path: 'sync/records',
+        name: 'Sync Records',
+        component: () => import('@/views/sync/SyncRecords.vue'),
+      },
+      {
+        path: 'sync/cookies',
+        name: 'Sync Cookies',
+        component: () => import('@/views/sync/SyncCookies.vue'),
+      },
+      {
+        path: 'sync/schedule',
+        name: 'Sync Schedule',
+        component: () => import('@/views/sync/SyncSchedule.vue'),
+      },
+      {
+        path: 'sync/logs',
+        name: 'Sync Logs',
+        component: () => import('@/views/sync/SyncLogs.vue'),
+      },
+      {
+        path: 'sync/settings',
+        name: 'Sync Settings',
+        component: () => import('@/views/sync/SyncSettings.vue'),
+      },
       { path: 'about', name: 'About', component: () => import('@/views/About.vue') },
     ],
   },

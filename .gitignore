@@ -39,3 +39,6 @@ pnpm-debug.log*
 # Test artifacts
 *.test
 *.tmp
+
+# Sync folder
+dysync.net/

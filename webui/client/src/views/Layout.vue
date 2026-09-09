@@ -35,6 +35,21 @@
           <el-icon><Refresh /></el-icon>
           <span>{{ t('tabs.updater') }}</span>
         </el-menu-item>
+        <el-sub-menu index="/sync">
+          <template #title>
+            <el-icon><FolderOpened /></el-icon>
+            <span>{{ t('web.sync.title') }}</span>
+          </template>
+          <el-menu-item index="/sync">{{ t('web.sync.overview') }}</el-menu-item>
+          <el-menu-item index="/sync/dashboard">{{ t('web.sync.dashboard') }}</el-menu-item>
+          <el-menu-item index="/sync/sources">{{ t('web.sync.sources') }}</el-menu-item>
+          <el-menu-item index="/sync/subscriptions">{{ t('web.sync.subscriptions') }}</el-menu-item>
+          <el-menu-item index="/sync/records">{{ t('web.sync.records') }}</el-menu-item>
+          <el-menu-item index="/sync/cookies">{{ t('web.sync.cookies') }}</el-menu-item>
+          <el-menu-item index="/sync/schedule">{{ t('web.sync.schedule') }}</el-menu-item>
+          <el-menu-item index="/sync/logs">{{ t('web.sync.sync_logs') }}</el-menu-item>
+          <el-menu-item index="/sync/settings">{{ t('web.sync.settings') }}</el-menu-item>
+        </el-sub-menu>
         <el-menu-item index="/about">
           <el-icon><InfoFilled /></el-icon>
           <span>{{ t('about.title') }}</span>
@@ -85,7 +100,7 @@ import { useI18n } from 'vue-i18n'
 import { ElMessageBox } from 'element-plus'
 import {
   VideoCamera, Download, List, Clock, Setting, Tools, Refresh,
-  InfoFilled, UserFilled, SwitchButton, CopyDocument,
+  InfoFilled, UserFilled, SwitchButton, CopyDocument, FolderOpened,
 } from '@element-plus/icons-vue'
 import { useAuthStore } from '@/stores/auth'
 import { useDownloadStore } from '@/stores/download'
@@ -113,6 +128,15 @@ const pageTitle = computed(() => {
     case '/settings': return t('settings.title')
     case '/tools': return t('buttons.custom_options')
     case '/updater': return t('tabs.updater')
+    case '/sync': return t('web.sync.overview')
+    case '/sync/dashboard': return t('web.sync.dashboard')
+    case '/sync/sources': return t('web.sync.sources')
+    case '/sync/subscriptions': return t('web.sync.subscriptions')
+    case '/sync/records': return t('web.sync.records')
+    case '/sync/cookies': return t('web.sync.cookies')
+    case '/sync/schedule': return t('web.sync.schedule')
+    case '/sync/logs': return t('web.sync.sync_logs')
+    case '/sync/settings': return t('web.sync.settings')
     case '/about': return t('about.title')
     default: return 'YTSage'
   }
@@ -175,6 +199,9 @@ onBeforeUnmount(() => {
 :deep(.el-menu-item) { color: var(--yts-text-dim); }
 :deep(.el-menu-item.is-active) { color: #ff6b6b; background: rgba(201, 0, 0, 0.12); }
 :deep(.el-menu-item:hover) { background: rgba(201, 0, 0, 0.08); color: #fff; }
+:deep(.el-sub-menu__title) { color: var(--yts-text-dim); }
+:deep(.el-sub-menu__title:hover) { background: rgba(201, 0, 0, 0.08); color: #fff; }
+:deep(.el-sub-menu .el-menu-item) { background: rgba(0, 0, 0, 0.18); }
 .version-info { padding: 14px 20px; border-top: 1px solid var(--yts-border); }
 .job-badge { margin-left: 8px; }
 .header {

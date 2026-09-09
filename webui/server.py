@@ -57,6 +57,11 @@ from .schemas import (
     YtdlpChannelRequest,
 )
 from .settings_service import build_download_defaults, get_all_settings, update_settings
+from .sync.routes import (
+    router as sync_router,
+    stream_router as sync_stream_router,
+    share_router as sync_share_router,
+)
 from .thumbnail_service import fetch_thumbnail
 from .url_utils import strip_control_chars, validate_video_url
 from .yt_dlp_finder import get_yt_dlp_path
@@ -104,6 +109,10 @@ async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] =
     return payload
 
 
+# YT sync center (all /api/sync/* endpoints require a valid token)
+app.include_router(sync_router, dependencies=[Depends(get_current_user)])
+
+
 async def get_user_allow_query_token(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
@@ -121,6 +130,14 @@ async def get_user_allow_query_token(
         if payload is not None:
             return payload
     raise HTTPException(status_code=401, detail="Not authenticated")
+
+
+# YT sync video streaming: <video> tags cannot send Authorization headers,
+# so these endpoints also accept a signed ?token= query parameter.
+app.include_router(sync_stream_router, dependencies=[Depends(get_user_allow_query_token)])
+
+# YT sync share links: anonymous playback via HMAC-signed tokens (dysync 分享).
+app.include_router(sync_share_router)
 
 
 def _ensure_not_updating() -> None:
@@ -888,6 +905,13 @@ async def startup_hooks():
         await asyncio.to_thread(history_service.ensure_wal_mode)
     except Exception as e:
         logger.warning(f"[WebUI] history WAL init failed: {e}")
+    # YT sync: periodic scheduler + log retention prune (dysync feature parity).
+    try:
+        from .sync import scheduler
+        scheduler.refresh_next_runs()
+        scheduler.start_scheduler()
+    except Exception as e:
+        logger.warning(f"[WebUI] sync scheduler init failed: {e}")
     asyncio.create_task(_auto_update_hook())
 
 
