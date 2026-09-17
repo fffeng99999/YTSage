@@ -99,6 +99,8 @@ def _migrate(conn) -> None:
         ("profiles", "cookie_invalid", "INT", "DEFAULT 0"),
         ("profiles", "cookie_checked_at", "REAL", ""),
         ("profiles", "cookie_check_error", "TEXT", ""),
+        # dysync parity: 会员内容 (members-only) needs a logged-in cookie.
+        ("records", "is_members", "INT", "DEFAULT 0"),
     ]
     for table, column, kind, extra in migrations:
         if not d.supports_default_on_text and kind == "TEXT" and "DEFAULT" in extra.upper():
@@ -391,6 +393,90 @@ def list_cookie_watch_profiles() -> List[Dict[str, Any]]:
     )
 
 
+def mark_members_only(video_id: str) -> None:
+    """Flag a record as members-only (needs a logged-in cookie to download)."""
+    _exec("UPDATE records SET is_members=1 WHERE video_id=?", (video_id,))
+
+
+def list_members_videos(channel: str, limit: int = 100) -> List[Dict[str, Any]]:
+    """All records of one channel/author, across every sync source."""
+    return _rows(
+        "SELECT * FROM records WHERE channel=? AND deleted_at IS NULL "
+        "ORDER BY last_sync DESC LIMIT ?",
+        (channel, max(1, int(limit))),
+    )
+
+
+def _merge_sync_mode(modes: List[str]) -> str:
+    """Collapse a member's per-target modes into one summary value."""
+    modes = [m or "sync" for m in modes]
+    if not modes:
+        return "none"
+    if all(m == "off" for m in modes):
+        return "off"
+    if all(m == "full_sync" for m in modes):
+        return "full_sync"
+    if all(m == "sync" for m in modes):
+        return "sync"
+    return "mixed"
+
+
+def list_members() -> List[Dict[str, Any]]:
+    """dysync parity: 关注列表 aggregated across every sync source.
+
+    Channels live in `targets` per profile, so the same author in two accounts
+    is two unrelated rows. This folds them into one "member" entry that keeps
+    the underlying target ids, so bulk actions can still be applied.
+    """
+    members: Dict[str, Dict[str, Any]] = {}
+
+    def _blank(key: str, name: str) -> Dict[str, Any]:
+        return {
+            "key": key, "channel_id": "", "name": name, "avatar_url": "",
+            "profile_ids": [], "target_ids": [], "sync_modes": [],
+            "save_paths": [], "enabled": False,
+            "video_count": 0, "total_size": 0, "is_members": 0,
+        }
+
+    for t in _rows("SELECT * FROM targets WHERE kind='channel'"):
+        key = "id:" + str(t.get("channel_id") or t.get("title") or t.get("url") or t["id"])
+        m = members.setdefault(key, _blank(key, t.get("title") or t.get("channel_id") or key))
+        m["channel_id"] = t.get("channel_id") or ""
+        m["name"] = t.get("title") or m["name"]
+        m["avatar_url"] = t.get("avatar_url") or ""
+        m["profile_ids"].append(t.get("profile_id"))
+        m["target_ids"].append(t.get("id"))
+        m["sync_modes"].append(t.get("sync_mode") or "sync")
+        if t.get("save_path"):
+            m["save_paths"].append(t.get("save_path"))
+        if t.get("enabled"):
+            m["enabled"] = True
+
+    # Fold in authors known only from records (e.g. synced via a playlist).
+    for r in _rows(
+        "SELECT channel, COUNT(*) c, SUM(size) s, MAX(is_members) mm "
+        "FROM records WHERE deleted_at IS NULL GROUP BY channel"
+    ):
+        name = (r.get("channel") or "").strip()
+        if not name:
+            continue
+        hit = next((m for m in members.values() if m["name"] == name), None)
+        if hit is None:
+            key = "name:" + name
+            hit = members.setdefault(key, _blank(key, name))
+        hit["video_count"] = int(r["c"] or 0)
+        hit["total_size"] = int(r["s"] or 0)
+        hit["is_members"] = int(r["mm"] or 0)
+
+    for m in members.values():
+        m["sync_mode"] = _merge_sync_mode(m["sync_modes"])
+        m["profile_count"] = len({p for p in m["profile_ids"] if p})
+        m["save_path"] = m["save_paths"][0] if m["save_paths"] else ""
+        m["target_count"] = len(m["target_ids"])
+    return sorted(members.values(),
+                  key=lambda x: (-(x.get("video_count") or 0), x["name"]))
+
+
 def list_failed_records(profile_id: Optional[int] = None, limit: int = 20) -> List[Dict[str, Any]]:
     """Records whose download failed - dysync 批量重下 re-queues these."""
     sql = "SELECT * FROM records WHERE status='failed' AND deleted_at IS NULL"
@@ -638,6 +724,10 @@ DEFAULT_SETTINGS = {
     # --- dysync parity: episode / series handling -----------------------
     "episode_naming": True,       # S01E01 prefix for series/mix targets
     "retry_failed": True,         # re-queue failed records on the next run
+    # Mirror sync downloads into the shared history db. Off by default: a large
+    # archive would flood the desktop app's history (it loads every entry with
+    # a thumbnail). Synced items live in `records` regardless.
+    "write_history": False,
 }
 
 

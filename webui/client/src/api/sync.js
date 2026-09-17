@@ -243,6 +243,32 @@ export function checkCookie(profileId) {
   return api.post(`/sync/cookies/check/${profileId}`).then((r) => r.data)
 }
 
+// ---- members: channels aggregated across all sync sources ---------------
+
+export function listMembers() {
+  return api.get('/sync/members').then((r) => r.data)
+}
+
+export function setMembersSyncMode(targetIds, syncMode) {
+  return api.post('/sync/members/batch-mode', { target_ids: targetIds, sync_mode: syncMode }).then((r) => r.data)
+}
+
+export function setMembersSavePath(targetIds, savePath) {
+  return api.post('/sync/members/batch-path', { target_ids: targetIds, save_path: savePath }).then((r) => r.data)
+}
+
+export function syncMembers(targetIds) {
+  return api.post('/sync/members/sync', { target_ids: targetIds }).then((r) => r.data)
+}
+
+export function getMemberVideos(name, limit = 100) {
+  return api.get('/sync/members/videos', { params: { name, limit } }).then((r) => r.data)
+}
+
+export function deleteMember(name) {
+  return api.delete('/sync/members', { params: { name } }).then((r) => r.data)
+}
+
 // ---- database backend (dysync: 数据库配置 / 迁移) -----------------------
 
 export function getDatabaseConfig() {

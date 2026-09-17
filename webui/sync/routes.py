@@ -898,6 +898,86 @@ async def discover_playlists(profile_id: int):
 
 
 # ---------------------------------------------------------------------------
+# Members: channels aggregated across every sync source (dysync 关注列表)
+# ---------------------------------------------------------------------------
+
+class MemberBatchModeRequest(BaseModel):
+    target_ids: List[int] = Field(default_factory=list)
+    sync_mode: str = Field(pattern=r"^(off|sync|full_sync)$")
+
+
+class MemberBatchPathRequest(BaseModel):
+    target_ids: List[int] = Field(default_factory=list)
+    save_path: str
+
+
+class MemberSyncRequest(BaseModel):
+    target_ids: List[int] = Field(default_factory=list, min_length=1)
+
+
+@router.get("/members")
+async def list_members():
+    """Every channel across all sync sources, with per-author statistics."""
+    return {"members": await asyncio.to_thread(store.list_members)}
+
+
+@router.post("/members/batch-mode")
+async def set_members_sync_mode(req: MemberBatchModeRequest):
+    """Enable/disable several channels at once (across sources)."""
+    n = await asyncio.to_thread(
+        _bulk_targets, req.target_ids, {"sync_mode": req.sync_mode}
+    )
+    return {"updated": n}
+
+
+@router.post("/members/batch-path")
+async def set_members_save_path(req: MemberBatchPathRequest):
+    n = await asyncio.to_thread(
+        _bulk_targets, req.target_ids, {"save_path": req.save_path}
+    )
+    return {"updated": n}
+
+
+@router.post("/members/sync")
+async def sync_members(req: MemberSyncRequest):
+    """Sync the selected channels now, grouped by their owning source."""
+    if await asyncio.to_thread(sync_engine.is_running):
+        raise HTTPException(409, "A sync is already running")
+    by_profile: Dict[int, List[int]] = {}
+    for tid in req.target_ids:
+        t = await asyncio.to_thread(store.get_target, tid)
+        if t and t.get("profile_id"):
+            by_profile.setdefault(int(t["profile_id"]), []).append(tid)
+    results = []
+    for pid, tids in by_profile.items():
+        results.append(await sync_engine.run_profile(pid, target_ids=tids))
+    return {"results": results}
+
+
+@router.get("/members/videos")
+async def member_videos(name: str = Query(...), limit: int = Query(100, ge=1, le=500)):
+    return {"entries": await asyncio.to_thread(store.list_members_videos, name, limit)}
+
+
+@router.delete("/members")
+async def delete_member(name: str = Query(..., min_length=1)):
+    """Remove every record of one author (dysync: 删除该博主全部视频)."""
+    removed = await asyncio.to_thread(store.delete_records_by_author, name)
+    return {"removed": removed}
+
+
+def _bulk_targets(target_ids: List[int], patch: Dict[str, Any]) -> int:
+    n = 0
+    for tid in target_ids or []:
+        try:
+            store.update_target(int(tid), dict(patch))
+            n += 1
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[sync] member bulk update failed for target {tid}: {e}")
+    return n
+
+
+# ---------------------------------------------------------------------------
 # Database backend (dysync: DatabaseConfigurationService / DatabaseMigrationService)
 # ---------------------------------------------------------------------------
 

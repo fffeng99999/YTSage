@@ -30,6 +30,9 @@
         <el-form-item :label="t('web.sync.set_retry_failed')">
           <el-switch v-model="form.retry_failed" />
         </el-form-item>
+        <el-form-item :label="t('web.sync.set_write_history')">
+          <el-switch v-model="form.write_history" />
+        </el-form-item>
         <el-form-item>
           <el-button type="primary" :loading="saving" @click="save">{{ t('web.sync.save') }}</el-button>
         </el-form-item>

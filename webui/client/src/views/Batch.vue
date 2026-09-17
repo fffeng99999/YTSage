@@ -52,6 +52,20 @@
             </el-button>
             <el-button v-if="batchDone > 0" text @click="router.push('/jobs')">{{ t('web.batch.go_to_jobs') }}</el-button>
             <span v-if="batchPumping" class="hint">{{ t('web.batch.progress', { done: batchDone, total: batchTotal }) }}</span>
+            <!-- Persistent batch: survives a backend restart, can be retried -->
+            <el-button
+              v-if="currentBatchId"
+              size="small"
+              :disabled="batchPumping"
+              @click="onRetryBatch"
+            >{{ t('web.batch.retry_batch') }}</el-button>
+            <el-button
+              v-if="currentBatchId && batchPumping"
+              size="small"
+              type="warning"
+              @click="onCancelBatch"
+            >{{ t('web.batch.cancel_batch') }}</el-button>
+            <span v-if="currentBatchId" class="hint">#{{ currentBatchId }}</span>
           </div>
 
           <el-table
@@ -279,7 +293,7 @@ import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElNotification } from 'element-plus'
 import { Search } from '@element-plus/icons-vue'
-import { analyzeBatch, analyzeChannel } from '@/api/batch'
+import { analyzeBatch, analyzeChannel, createBatch, retryBatch, cancelBatch } from '@/api/batch'
 import { startDownload } from '@/api/download'
 import { errText } from '@/api/http'
 import { SPONSORBLOCK_CATEGORIES } from '@/stores/analysis'
@@ -497,6 +511,8 @@ const batchSelected = ref([])
 
 const batchPump = createPump(doneNotification)
 const batchPumping = computed(() => batchPump.state.pumping)
+// Persistent batch id for the current run (see /api/batch).
+const currentBatchId = ref(null)
 const batchDone = computed(() => batchPump.state.done)
 const batchTotal = computed(() => batchPump.state.total)
 
@@ -640,7 +656,37 @@ async function startBatchDownload() {
     row.payload = buildBatchPayload(row)
     row.title = row.summary?.title
   }
+  // Register a persistent batch first so the rows can be replayed later
+  // ("retry batch") even if the backend restarts mid-download.
+  currentBatchId.value = null
+  try {
+    const urls = rows.map((r) => r.payload?.url).filter(Boolean)
+    const res = await createBatch(urls, downloadPath.value, '')
+    currentBatchId.value = res?.batch_id || null
+  } catch (e) {
+    // Batch bookkeeping must never block the actual download.
+    console.warn('[batch] createBatch failed', e)
+  }
+  if (currentBatchId.value) {
+    for (const row of rows) row.payload.batch_id = currentBatchId.value
+  }
   batchPump.start(rows)
+}
+
+async function onRetryBatch() {
+  if (!currentBatchId.value) return
+  try {
+    const r = await retryBatch(currentBatchId.value)
+    ElMessage.success(t('web.batch.retry_queued', { n: r.queued || 0 }))
+  } catch (e) { ElMessage.error(errText(e)) }
+}
+
+async function onCancelBatch() {
+  if (!currentBatchId.value) return
+  try {
+    await cancelBatch(currentBatchId.value)
+    ElMessage.success(t('web.sync.saved'))
+  } catch (e) { ElMessage.error(errText(e)) }
 }
 
 /* --------------------------------------------------------------------------

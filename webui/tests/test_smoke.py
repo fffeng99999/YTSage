@@ -316,6 +316,73 @@ def test_database_migration():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ---------------------------------------------------------------------------
+# 8. Separating normal / batch / sync downloads
+# ---------------------------------------------------------------------------
+
+def test_source_tagging():
+    """Every job carries its origin so the three features stay separable."""
+    from webui.download_manager import DownloadJob
+    from webui.sync import store
+
+    j = DownloadJob(job_id="1", url="u", path="p")
+    check("default source is single", j.source == "single")
+
+    j2 = DownloadJob(job_id="2", url="u", path="p", source="sync",
+                     source_id="3", source_ref="4")
+    check("sync provenance stored",
+          j2.source == "sync" and j2.source_id == "3" and j2.source_ref == "4")
+
+    # history `options` may only gain keys - the desktop app shares that table
+    # and its structure must never change.
+    check("sync does not write history by default",
+          store.DEFAULT_SETTINGS.get("write_history") is False)
+
+
+def test_batch_lifecycle():
+    """Persistent batches: create -> track -> retry -> delete."""
+    from webui import tasks
+
+    urls = ["https://youtu.be/aaaaaaaaaaa", "https://youtu.be/bbbbbbbbbbb"]
+    bid = tasks.create_batch(urls, "smoke", "D:/tmp/ytsage_batch")
+    try:
+        b = tasks.get_batch(bid)
+        check("batch created", bid > 0 and len(b["items"]) == 2)
+
+        # Both rows store their options when queued, so a retry can replay them.
+        tasks.save_item_payload(bid, urls[0], {
+            "url": urls[0], "path": "D:/tmp/ytsage_batch", "format_id": "137",
+        })
+        tasks.save_item_payload(bid, urls[1], {
+            "url": urls[1], "path": "D:/tmp/ytsage_batch", "format_id": "18",
+        })
+        tasks.set_batch_job(bid, urls[0], "job-1")
+        tasks.update_item_by_job("job-1", status="completed",
+                                 file_path="D:/tmp/ytsage_batch/a.mp4")
+        b = tasks.get_batch(bid)
+        check("completed row tracked", b["done"] == 1)
+        check("file path recorded", any(i.get("file_path") for i in b["items"]))
+
+        retry = tasks.retryable_items(bid)
+        check("only unfinished rows are retryable",
+              len(retry) == 1 and retry[0]["url"] == urls[1])
+        check("payload replayed for retry",
+              retry and retry[0]["payload"].get("format_id") == "18")
+    finally:
+        tasks.delete_batch(bid)
+    check("batch deleted", tasks.get_batch(bid) is None)
+
+
+def test_members_only_detection():
+    """dysync parity: members-only videos need a logged-in cookie."""
+    from webui.sync.engine import _looks_members_only
+
+    check("detects members-only", _looks_members_only("ERROR: this video is members-only"))
+    check("detects subscriber_only", _looks_members_only("availability: subscriber_only"))
+    check("detects join prompt", _looks_members_only("Join this channel to get access"))
+    check("ignores unrelated errors", not _looks_members_only("ERROR: video unavailable"))
+
+
 def main():
     for fn in (
         test_job_fields_cover_command_builder,
@@ -330,6 +397,9 @@ def main():
         test_target_kind_validation,
         test_dialect_ddl,
         test_database_migration,
+        test_source_tagging,
+        test_batch_lifecycle,
+        test_members_only_detection,
     ):
         print(f"--- {fn.__name__} ---")
         try:

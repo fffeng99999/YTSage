@@ -86,12 +86,21 @@ class DownloadRequest(BaseModel):
     # Network resilience (module 7.3): None -> use global settings.
     retries: Optional[int] = None
     fragment_retries: Optional[int] = None
+    # Batch provenance: when set, the job belongs to this batch (see tasks.py).
+    batch_id: Optional[int] = None
     # Metadata for history entries (official writes history from video_info)
     title: Optional[str] = None
     channel: Optional[str] = None
     duration: Optional[str] = None
     thumbnail_url: Optional[str] = None
     analysis_id: Optional[str] = None
+
+
+class BatchCreateRequest(BaseModel):
+    """Create a persistent batch download (survives a backend restart)."""
+    urls: List[str] = Field(default_factory=list, min_length=1, max_length=500)
+    path: str
+    name: Optional[str] = None
 
 
 class PlaylistExportRequest(BaseModel):

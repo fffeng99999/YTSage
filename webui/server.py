@@ -51,6 +51,7 @@ from .official_bridge import (
 from .schemas import (
     AnalyzeRequest,
     BatchAnalyzeRequest,
+    BatchCreateRequest,
     ChannelAnalyzeRequest,
     CommandRunRequest,
     CookieApplyRequest,
@@ -66,6 +67,7 @@ from .schemas import (
     YtdlpChannelRequest,
 )
 from .settings_service import SETTINGS_SCHEMA, build_download_defaults, get_all_settings, update_settings
+from . import tasks
 from .sync.routes import (
     router as sync_router,
     stream_router as sync_stream_router,
@@ -380,11 +382,119 @@ async def start_download(req: DownloadRequest, auth: dict = Depends(get_current_
         data["fragment_retries"] = cfg_get("fragment_retries")
         if data["fragment_retries"] is None:
             data["fragment_retries"] = SETTINGS_SCHEMA["fragment_retries"][1]
+    # Provenance. Only "single"/"batch" may come from here - "sync" is tagged
+    # by the sync engine, so the three features stay separable.
+    batch_id = data.get("batch_id")
+    if batch_id:
+        data["source"] = "batch"
+        data["source_id"] = str(batch_id)
+    elif not data.get("source"):
+        data["source"] = "single"
+    if data["source"] not in ("single", "batch"):
+        raise HTTPException(status_code=400, detail="invalid source")
     try:
         job_id = await download_manager.start_download(data)
+        await asyncio.to_thread(
+            tasks.record_task, data["source"], job_id,
+            source_id=str(data.get("source_id") or ""),
+        )
+        if batch_id:
+            # Keep the row's options so "retry batch" can replay them exactly.
+            await asyncio.to_thread(
+                tasks.save_item_payload, int(batch_id), data.get("url") or "", data
+            )
+            await asyncio.to_thread(tasks.set_batch_job, int(batch_id), data.get("url") or "", job_id)
         return {"job_id": job_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Batch downloads (persistent batches, separate from normal / sync downloads)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/batch")
+async def create_batch(req: BatchCreateRequest, auth: dict = Depends(get_current_user)):
+    """Create a batch. Each URL is later queued via /api/download?batch_id=.."""
+    if not await asyncio.to_thread(system_service.is_download_dir_allowed, Path(req.path)):
+        raise HTTPException(status_code=400, detail="download path not allowed")
+    batch_id = await asyncio.to_thread(
+        tasks.create_batch, req.urls, req.name or "", req.path
+    )
+    return {"batch_id": batch_id}
+
+
+@app.get("/api/batch")
+async def list_batches(limit: int = 30, offset: int = 0, auth: dict = Depends(get_current_user)):
+    return {"batches": await asyncio.to_thread(tasks.list_batches, limit, offset)}
+
+
+@app.get("/api/batch/{batch_id}")
+async def get_batch(batch_id: int, auth: dict = Depends(get_current_user)):
+    b = await asyncio.to_thread(tasks.get_batch, batch_id)
+    if not b:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    return b
+
+
+@app.post("/api/batch/{batch_id}/retry")
+async def retry_batch(batch_id: int, auth: dict = Depends(get_current_user)):
+    """Re-queue the unfinished rows of a batch with their original options."""
+    b = await asyncio.to_thread(tasks.get_batch, batch_id)
+    if not b:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    _ensure_not_updating()
+    items = await asyncio.to_thread(tasks.retryable_items, batch_id)
+    queued = 0
+    for item in items:
+        payload = dict(item["payload"] or {})
+        payload["url"] = payload.get("url") or item["url"]
+        payload["path"] = payload.get("path") or b.get("download_path") or ""
+        payload["batch_id"] = batch_id
+        if not payload["path"]:
+            continue
+        try:
+            job_id = await download_manager.start_download(payload)
+            await asyncio.to_thread(
+                tasks.set_batch_job, batch_id, item["url"], job_id
+            )
+            queued += 1
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[WebUI] batch {batch_id} retry failed for {item['url']}: {e}")
+    await asyncio.to_thread(tasks.reset_batch, batch_id)
+    return {"queued": queued}
+
+
+@app.post("/api/batch/{batch_id}/cancel")
+async def cancel_batch(batch_id: int, auth: dict = Depends(get_current_user)):
+    """Cancel the rows that have not finished yet."""
+    job_ids = await asyncio.to_thread(tasks.pending_job_ids, batch_id)
+    for job_id in job_ids:
+        try:
+            await download_manager.cancel(job_id)
+        except Exception:  # noqa: BLE001
+            pass
+    await asyncio.to_thread(tasks.cancel_batch, batch_id)
+    return {"cancelled": len(job_ids)}
+
+
+@app.delete("/api/batch/{batch_id}")
+async def delete_batch(batch_id: int, auth: dict = Depends(get_current_user)):
+    await asyncio.to_thread(tasks.delete_batch, batch_id)
+    return {"ok": True}
+
+
+@app.get("/api/tasks")
+async def list_tasks(
+    source: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    auth: dict = Depends(get_current_user),
+):
+    """Unified task index across normal / batch / sync downloads."""
+    if source and source not in ("single", "batch", "sync"):
+        raise HTTPException(status_code=400, detail="invalid source")
+    return await asyncio.to_thread(tasks.list_tasks, source, limit, offset)
 
 
 @app.get("/api/jobs")
@@ -969,7 +1079,44 @@ async def startup_hooks():
         scheduler.start_scheduler()
     except Exception as e:
         logger.warning(f"[WebUI] sync scheduler init failed: {e}")
+    # Mirror finished jobs into the batch / task database.
+    asyncio.create_task(_track_tasks())
     asyncio.create_task(_auto_update_hook())
+
+
+async def _track_tasks():
+    """Keep batch_items + task_index in sync with the download manager."""
+    q = bus.subscribe()
+    try:
+        while True:
+            ev = await q.get()
+            if ev.get("type") != "job_finished":
+                continue
+            job = ev.get("job") or {}
+            job_id = job.get("job_id")
+            if not job_id:
+                continue
+            status = job.get("status")
+            try:
+                await asyncio.to_thread(
+                    tasks.update_item_by_job,
+                    job_id,
+                    status=status,
+                    title=job.get("title"),
+                    file_path=job.get("last_file_path"),
+                    history_id=str(job.get("history_id") or ""),
+                    error=job.get("error"),
+                )
+                await asyncio.to_thread(
+                    tasks.update_task,
+                    job_id,
+                    status=status,
+                    history_id=str(job.get("history_id") or ""),
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[WebUI] task tracking failed for {job_id}: {e}")
+    finally:
+        bus.unsubscribe(q)
 
 
 async def _auto_update_hook():

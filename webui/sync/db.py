@@ -176,9 +176,10 @@ class Dialect:
     def column_type(self, kind: str) -> str:
         return {"STR": "TEXT", "TEXT": "TEXT", "INT": "INTEGER", "REAL": "REAL"}[kind]
 
-    def create_table(self, table: str) -> str:
+    def create_table(self, table: str, tables: Optional[Dict[str, List[Tuple[str, str, str]]]] = None) -> str:
+        defs = tables if tables is not None else TABLE_DEFS
         cols = []
-        for name, kind, extra in TABLE_DEFS[table]:
+        for name, kind, extra in defs[table]:
             if kind == "PK":
                 cols.append(self.pk_ddl(name))
                 continue
@@ -442,15 +443,23 @@ def connect(cfg: Optional[Dict[str, Any]] = None):
     raise ValueError(f"unsupported database type: {db_type}")
 
 
-def create_schema(conn, dialect: Optional[Dialect] = None) -> None:
-    """Create tables + indexes (idempotent enough for all three engines)."""
+def create_schema(conn, dialect: Optional[Dialect] = None,
+                  tables: Optional[Dict[str, List[Tuple[str, str, str]]]] = None,
+                  indexes: Sequence[Tuple[str, str, Sequence[str]]] = ()) -> None:
+    """Create tables + indexes (idempotent enough for all three engines).
+
+    Defaults to the sync schema; pass `tables`/`indexes` to create another set
+    (used by the Web UI's own task database).
+    """
     dialect = dialect or get_dialect(load_config().get("type"))
+    defs = tables if tables is not None else TABLE_DEFS
+    idx = indexes if indexes else INDEXES
     cur = conn.cursor()
     try:
-        for table in TABLE_DEFS:
-            cur.execute(dialect.create_table(table))
+        for table in defs:
+            cur.execute(dialect.create_table(table, defs))
         conn.commit()
-        for name, table, cols in INDEXES:
+        for name, table, cols in idx:
             try:
                 cur.execute(dialect.create_index(name, table, cols))
                 conn.commit()

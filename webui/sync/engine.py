@@ -136,6 +136,19 @@ def _jitter(settings: Dict[str, Any]) -> float:
     return random.uniform(lo, hi) if hi > lo else lo
 
 
+_MEMBERS_HINTS = (
+    "members-only", "members only", "subscriber_only", "subscriber only",
+    "this video is available to this channel's members",
+    "join this channel",
+)
+
+
+def _looks_members_only(text: str) -> bool:
+    """Detect a members-only (channel membership) failure."""
+    low = (text or "").lower()
+    return any(h in low for h in _MEMBERS_HINTS)
+
+
 def _file_alive(rec: Dict[str, Any]) -> bool:
     """True when the recorded file still exists.
 
@@ -312,6 +325,10 @@ class SyncEngine:
         if not rec:
             return
         ok = job.get("status") == "completed"
+        if not ok and _looks_members_only(job.get("error") or ""):
+            # dysync parity: members-only videos need a logged-in cookie.
+            # Flag it so the UI can explain why it will keep failing.
+            store.mark_members_only(video_id)
         store.upsert_record({
             "video_id": video_id,
             "video_title": job.get("title") or rec.get("video_title"),
@@ -623,7 +640,7 @@ class SyncEngine:
         # entirely here, so sync downloads ignored them.
         gd = await asyncio.to_thread(_global_download_defaults)
 
-        await download_manager.start_download({
+        job_id = await download_manager.start_download({
             "url": f"https://www.youtube.com/watch?v={video_id}",
             "path": str(folder),
             "format_id": _format_selector(str(settings.get("resolution") or "1080")),
@@ -639,7 +656,23 @@ class SyncEngine:
             "geo_proxy_url": gd.get("geo_proxy_url"),
             "retries": gd.get("retries"),
             "fragment_retries": gd.get("fragment_retries"),
+            # Provenance: sync downloads are distinguishable from normal /
+            # batch ones in the task index and (optionally) in history.
+            "source": "sync",
+            "source_id": str(profile.get("id") or ""),
+            "source_ref": str(target.get("id") or ""),
         })
+        try:
+            # Unified task index: sync jobs show up next to normal / batch ones.
+            from .. import tasks
+
+            await asyncio.to_thread(
+                tasks.record_task, "sync", job_id,
+                source_id=str(profile.get("id") or ""),
+                source_ref=str(target.get("id") or ""),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[sync] task index write failed: {e}")
 
 
 engine = SyncEngine()

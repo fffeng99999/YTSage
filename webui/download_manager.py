@@ -144,6 +144,16 @@ class DownloadJob:
     retries: Optional[int] = None
     fragment_retries: Optional[int] = None
 
+    # Provenance: which feature queued this job.
+    #   source    = single | batch | sync
+    #   source_id = batch_id (batch) or profile_id (sync)
+    #   source_ref= target_id (sync only)
+    # Recorded in history `options` so the three features stay separable
+    # without touching the shared (desktop-owned) history schema.
+    source: str = "single"
+    source_id: Optional[str] = None
+    source_ref: Optional[str] = None
+
     # History metadata (official writes history from video_info)
     title: Optional[str] = None
     channel: Optional[str] = None
@@ -176,6 +186,16 @@ class DownloadJob:
 # ---------------------------------------------------------------------------
 # Command builder (mirrors official DownloadThread._build_yt_dlp_command)
 # ---------------------------------------------------------------------------
+
+def _sync_writes_history() -> bool:
+    """Whether sync downloads should also land in the shared history db."""
+    try:
+        from .sync import store as sync_store
+
+        return bool(sync_store.get_all_settings().get("write_history", False))
+    except Exception:  # noqa: BLE001
+        return False
+
 
 def build_ytdlp_command(job: DownloadJob) -> List[str]:
     """Build yt-dlp command line. Adapted from official DownloadThread."""
@@ -820,9 +840,17 @@ class DownloadManager:
             self._pump()
 
     async def _write_history(self, job: DownloadJob) -> None:
-        """Official: download_finished -> HistoryManager.add_entry (main.py L1004-1042)."""
+        """Official: download_finished -> HistoryManager.add_entry (main.py L1004-1042).
+
+        Sync downloads are kept out by default: a multi-thousand-video archive
+        would flood the desktop app's history, which loads every entry with a
+        thumbnail. Opt in with the sync setting `write_history`.
+        """
         try:
             if not job.last_file_path or not Path(job.last_file_path).exists():
+                return
+            source = job.source or "single"
+            if source == "sync" and not _sync_writes_history():
                 return
             from . import history_service
             download_options = {
@@ -837,6 +865,13 @@ class DownloadManager:
                 "embed_thumbnail": job.embed_thumbnail,
                 "download_section": job.download_section,
                 "force_keyframes": job.force_keyframes,
+                # Provenance. The desktop app json-loads this field into a dict
+                # and ignores keys it does not know, so adding them is safe -
+                # and it is the only way to tag a source without altering the
+                # shared table layout.
+                "source": source,
+                "source_id": job.source_id,
+                "source_ref": job.source_ref,
             }
             hid = await history_service.add_entry(
                 title=job.title or (Path(job.last_file_path).stem),

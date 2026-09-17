@@ -84,6 +84,12 @@ const routes = [
         component: () => import('@/views/sync/SyncSettings.vue'),
       },
       {
+        // dysync parity: 全体成员 - channels aggregated across all sources.
+        path: 'sync/members',
+        name: 'Sync Members',
+        component: () => import('@/views/sync/SyncMembers.vue'),
+      },
+      {
         // dysync parity: 支持移动端 - phone-sized view of the sync centre.
         path: 'sync/mobile',
         name: 'Sync Mobile',

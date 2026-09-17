@@ -44,6 +44,7 @@
           <el-menu-item index="/sync/dashboard">{{ t('web.sync.dashboard') }}</el-menu-item>
           <el-menu-item index="/sync/sources">{{ t('web.sync.sources') }}</el-menu-item>
           <el-menu-item index="/sync/subscriptions">{{ t('web.sync.subscriptions') }}</el-menu-item>
+          <el-menu-item index="/sync/members">{{ t('web.sync.members') }}</el-menu-item>
           <el-menu-item index="/sync/records">{{ t('web.sync.records') }}</el-menu-item>
           <el-menu-item index="/sync/cookies">{{ t('web.sync.cookies') }}</el-menu-item>
           <el-menu-item index="/sync/schedule">{{ t('web.sync.schedule') }}</el-menu-item>
@@ -132,6 +133,7 @@ const pageTitle = computed(() => {
     case '/sync/dashboard': return t('web.sync.dashboard')
     case '/sync/sources': return t('web.sync.sources')
     case '/sync/subscriptions': return t('web.sync.subscriptions')
+    case '/sync/members': return t('web.sync.members')
     case '/sync/records': return t('web.sync.records')
     case '/sync/cookies': return t('web.sync.cookies')
     case '/sync/schedule': return t('web.sync.schedule')
