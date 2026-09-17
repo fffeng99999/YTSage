@@ -243,6 +243,17 @@ export function checkCookie(profileId) {
   return api.post(`/sync/cookies/check/${profileId}`).then((r) => r.data)
 }
 
+// dysync parity: sweep every profile at once; auto_disable turns off the ones
+// whose cookie no longer works.
+export function checkAllCookies(autoDisable = false) {
+  return api.post('/sync/cookies/check-all', null, { params: { auto_disable: autoDisable } }).then((r) => r.data)
+}
+
+// dysync parity: 自定义收藏夹 - list the account's own playlists to tick.
+export function discoverPlaylists(profileId) {
+  return api.get('/sync/discover/playlists', { params: { profile_id: profileId } }).then((r) => r.data)
+}
+
 // ---- streaming ---------------------------------------------------------
 
 export function getVideoStreamUrl(videoId) {

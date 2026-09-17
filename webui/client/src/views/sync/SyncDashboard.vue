@@ -108,7 +108,7 @@
 import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Star, FolderOpened, VideoCamera, Bell, FullScreen, Loading } from '@element-plus/icons-vue'
+import { Star, FolderOpened, VideoCamera, Bell, FullScreen, Loading, Collection } from '@element-plus/icons-vue'
 import { getStatistics, getTrendStats, getAuthorStats, deleteAuthorRecords } from '@/api/sync'
 import { errText } from '@/api/http'
 

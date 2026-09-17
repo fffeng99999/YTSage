@@ -115,8 +115,10 @@ try:
 except ImportError:
     _OfficialConfigManager = None
 
-# Fallback JSON config shim (used only when official package unavailable)
-_FALLBACK_CONFIG_FILE = Path(__file__).parent.parent / "webui" / ".fallback_config.json"
+# Fallback JSON config shim (used only when official package unavailable).
+# Kept under the user data directory - writing it next to the source made the
+# package directory dirty and fails outright on a read-only install.
+_FALLBACK_CONFIG_FILE = APP_DATA_DIR / "webui_fallback_config.json"
 
 
 class _FallbackConfig:

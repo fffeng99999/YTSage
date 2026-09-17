@@ -5,8 +5,10 @@ FastAPI router for the YT sync center, mounted under /api/sync in server.py.
 """
 
 import asyncio
+import json
 import logging
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -96,8 +98,12 @@ class UpdateProfile(BaseModel):
     dedup_priority: Optional[List[str]] = None
 
 
+# dysync-parity kinds. mix/series/posts were added for 合集/短剧/图文 parity.
+_TARGET_KIND_RE = r"^(playlist|liked|channel|subscriptions|favorites|mix|series|posts)$"
+
+
 class CreateTarget(BaseModel):
-    kind: str = Field(pattern=r"^(playlist|liked|channel|subscriptions|favorites)$")
+    kind: str = Field(pattern=_TARGET_KIND_RE)
     url: str = ""
     title: Optional[str] = None
     folder: Optional[str] = None
@@ -105,7 +111,9 @@ class CreateTarget(BaseModel):
 
 
 class UpdateTarget(BaseModel):
-    kind: Optional[str] = None
+    # Validated like CreateTarget: without the pattern, PUT could store any
+    # kind string and the engine would silently ignore the target.
+    kind: Optional[str] = Field(default=None, pattern=_TARGET_KIND_RE)
     url: Optional[str] = None
     title: Optional[str] = None
     folder: Optional[str] = None
@@ -265,15 +273,23 @@ async def permanent_delete_records(req: PermanentDeleteRequest):
     if not req.ids:
         raise HTTPException(400, "No records selected")
     if req.delete_files:
+        from ..system_service import is_file_download_allowed
+
         for rid in req.ids:
             rec = await asyncio.to_thread(store.get_record_by_db_id, rid)
             fp = (rec or {}).get("file_path")
-            if fp:
-                try:
-                    from pathlib import Path as _P
-                    _P(fp).unlink(missing_ok=True)
-                except Exception:
-                    pass
+            if not fp:
+                continue
+            # The path comes from the database and could point anywhere, so it
+            # gets the same whitelist treatment as /api/download-file before
+            # being unlinked.
+            if not await asyncio.to_thread(is_file_download_allowed, Path(fp)):
+                logger.warning(f"[WebUI] permanent-delete skipped disallowed path: {fp}")
+                continue
+            try:
+                Path(fp).unlink(missing_ok=True)
+            except Exception:
+                pass
     removed = await asyncio.to_thread(store.real_delete_records, req.ids, req.also_exclude)
     return {"removed": removed}
 
@@ -791,9 +807,80 @@ async def check_cookie(profile_id: int):
         valid = result.returncode == 0
         err = "" if valid else (result.stderr or "").strip()[-400:]
         await asyncio.to_thread(_cookie_cache_set, profile_id, valid, err)
+        # Persisted as well: the scheduler's daily sweep and the overview
+        # banner read the stored state, not the in-memory cache.
+        await asyncio.to_thread(store.set_cookie_status, profile_id, not valid, err)
         return {"profile_id": profile_id, "cookie_valid": valid, "error": err,
                 "checked_at": time.time()}
     except Exception as e:
         await asyncio.to_thread(_cookie_cache_set, profile_id, False, str(e))
+        await asyncio.to_thread(store.set_cookie_status, profile_id, True, str(e))
         return {"profile_id": profile_id, "cookie_valid": False, "error": str(e),
                 "checked_at": time.time()}
+
+
+@router.post("/cookies/check-all")
+async def check_all_cookies(auto_disable: bool = False):
+    """dysync Cookie 过期提醒: probe every configured profile at once.
+
+    auto_disable turns the profile off when its cookie no longer works, so
+    scheduled runs stop retrying an account that can no longer sign in.
+    """
+    profiles = await asyncio.to_thread(store.list_cookie_watch_profiles)
+    results = []
+    for p in profiles:
+        try:
+            res = await check_cookie(int(p["id"]))
+        except Exception as e:  # noqa: BLE001
+            res = {"profile_id": p["id"], "cookie_valid": False, "error": str(e)}
+        results.append(res)
+        if auto_disable and not res.get("cookie_valid"):
+            await asyncio.to_thread(store.update_profile, int(p["id"]), {"enabled": False})
+    invalid = sum(1 for r in results if not r.get("cookie_valid"))
+    return {"checked": len(results), "invalid": invalid, "results": results}
+
+
+@router.get("/discover/playlists")
+async def discover_playlists(profile_id: int):
+    """dysync 自定义收藏夹: list the account's own playlists.
+
+    dysync lets you tick the collections to archive; without this the user has
+    to hunt down and paste playlist URLs by hand.
+    """
+    from ..analysis_service import _sync_run
+    from ..yt_dlp_finder import get_yt_dlp_path
+    from .engine import _build_auth_options
+
+    profile = await asyncio.to_thread(store.get_profile, profile_id)
+    if not profile:
+        raise HTTPException(404, "Profile not found")
+
+    auth_opts = _build_auth_options(profile)
+    cmd = [get_yt_dlp_path(), "--dump-single-json", "--flat-playlist", "--no-warnings"]
+    cmd += auth_opts + ["https://www.youtube.com/feed/playlists"]
+    try:
+        result = await asyncio.to_thread(_sync_run, cmd, 90)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"discover failed: {e}")
+    if result.returncode != 0:
+        raise HTTPException(400, (result.stderr or "").strip()[-400:] or "discover failed")
+    try:
+        lines = [l for l in (result.stdout or "").split("\n") if l.strip()]
+        info = json.loads(lines[0])
+    except (json.JSONDecodeError, IndexError):
+        raise HTTPException(400, "discover: cannot parse the playlist listing")
+
+    items = []
+    for e in (info.get("entries") or []):
+        if not e:
+            continue
+        pid = e.get("id")
+        items.append({
+            "id": pid,
+            "title": e.get("title") or pid or "",
+            "url": e.get("url") or e.get("webpage_url")
+                   or (f"https://www.youtube.com/playlist?list={pid}" if pid else ""),
+            "video_count": e.get("playlist_count") or e.get("video_count"),
+            "channel": e.get("channel") or e.get("uploader"),
+        })
+    return {"playlists": items}

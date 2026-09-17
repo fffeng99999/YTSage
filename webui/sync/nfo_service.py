@@ -44,8 +44,23 @@ def _description_text(record: Dict[str, Any]) -> str:
     return ""
 
 
+def _parse_episode(file_path: str):
+    """Pull (season, episode) out of a "S01E12_..." style file name."""
+    if not file_path:
+        return None
+    m = re.search(r"[Ss](\d{1,2})[Ee](\d{1,3})", Path(file_path).stem)
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2))
+
+
 def generate_nfo(record: Dict[str, Any], output_dir: Path) -> bool:
-    """Write <video_stem>.nfo (+ poster) for one record into its folder."""
+    """Write <video_stem>.nfo (+ poster) for one record into its folder.
+
+    Series / mix records written with S01E01 numbering get an
+    `episodedetails` NFO (dysync's 合集/短剧 handling) so Emby/Jellyfin files
+    them under the playlist's tvshow.nfo instead of as standalone movies.
+    """
     try:
         video_id = record.get("video_id")
         title = record.get("video_title") or "Unknown"
@@ -56,28 +71,61 @@ def generate_nfo(record: Dict[str, Any], output_dir: Path) -> bool:
         file_path = record.get("file_path") or ""
         stem = _sanitize(Path(file_path).stem if file_path else video_id or title)
 
-        root = Element("movie")
-        SubElement(root, "title").text = title
-        SubElement(root, "originaltitle").text = title
+        episode = _parse_episode(file_path) if kind in ("series", "mix") else None
         plot = _description_text(record)
-        SubElement(root, "plot").text = plot
-        SubElement(root, "outline").text = plot[:300]
-        if first_sync:
-            SubElement(root, "dateadded").text = datetime.fromtimestamp(first_sync).strftime("%Y-%m-%d %H:%M:%S")
-            SubElement(root, "premiered").text = datetime.fromtimestamp(first_sync).strftime("%Y-%m-%d")
-        SubElement(root, "studio").text = channel
-        actor = SubElement(root, "actor")
-        SubElement(actor, "name").text = channel
-        SubElement(actor, "role").text = "Channel"
-        SubElement(root, "tag").text = (kind or "video").capitalize()
-        uid = SubElement(root, "uniqueid")
-        uid.set("type", "youtube")
-        uid.set("default", "true")
-        uid.text = video_id
-        if url:
-            SubElement(root, "website").text = url
-        if file_path:
-            SubElement(root, "filenameandpath").text = file_path
+        aired = (
+            datetime.fromtimestamp(first_sync).strftime("%Y-%m-%d") if first_sync else ""
+        )
+
+        if episode:
+            season_no, episode_no = episode
+            target = store.get_target(record["target_id"]) if record.get("target_id") else None
+            show_title = (target or {}).get("title") or channel or "YouTube Series"
+            root = Element("episodedetails")
+            SubElement(root, "title").text = title
+            SubElement(root, "showtitle").text = show_title
+            SubElement(root, "season").text = str(season_no)
+            SubElement(root, "episode").text = str(episode_no)
+            SubElement(root, "plot").text = plot
+            SubElement(root, "outline").text = plot[:300]
+            if aired:
+                SubElement(root, "aired").text = aired
+                SubElement(root, "dateadded").text = aired
+            SubElement(root, "studio").text = channel
+            actor = SubElement(root, "actor")
+            SubElement(actor, "name").text = channel
+            SubElement(actor, "role").text = "Channel"
+            uid = SubElement(root, "uniqueid")
+            uid.set("type", "youtube")
+            uid.set("default", "true")
+            uid.text = video_id
+            if url:
+                SubElement(root, "website").text = url
+            if file_path:
+                SubElement(root, "filenameandpath").text = file_path
+        else:
+            root = Element("movie")
+            SubElement(root, "title").text = title
+            SubElement(root, "originaltitle").text = title
+            SubElement(root, "plot").text = plot
+            SubElement(root, "outline").text = plot[:300]
+            if first_sync:
+                SubElement(root, "dateadded").text = datetime.fromtimestamp(first_sync).strftime("%Y-%m-%d %H:%M:%S")
+            if aired:
+                SubElement(root, "premiered").text = aired
+            SubElement(root, "studio").text = channel
+            actor = SubElement(root, "actor")
+            SubElement(actor, "name").text = channel
+            SubElement(actor, "role").text = "Channel"
+            SubElement(root, "tag").text = (kind or "video").capitalize()
+            uid = SubElement(root, "uniqueid")
+            uid.set("type", "youtube")
+            uid.set("default", "true")
+            uid.text = video_id
+            if url:
+                SubElement(root, "website").text = url
+            if file_path:
+                SubElement(root, "filenameandpath").text = file_path
 
         indent(root)
         xml_str = '<?xml version="1.0" encoding="utf-8" standalone="yes"?>\n' + tostring(root, encoding="unicode")
@@ -111,6 +159,20 @@ def _save_poster(record: Dict[str, Any], output_dir: Path, stem: str) -> Optiona
     except Exception as e:
         logger.warning(f"[sync] poster save failed for {record.get('video_id')}: {e}")
         return None
+
+
+def ensure_tvshow_nfo(target: Dict[str, Any], folder: Path) -> bool:
+    """Idempotent wrapper: write tvshow.nfo only if it is not there yet.
+
+    generate_tvshow_nfo() existed but had no caller, so series/mix folders
+    never got a tvshow.nfo and Emby/Jellyfin could not group them as a show.
+    """
+    try:
+        if (folder / "tvshow.nfo").exists():
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    return generate_tvshow_nfo(target, folder)
 
 
 def generate_tvshow_nfo(target: Dict[str, Any], folder: Path) -> bool:

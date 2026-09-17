@@ -223,11 +223,15 @@ def _sha256_of(path: Path) -> str:
     return h.hexdigest()
 
 
-def _verify_sha256_url(file_path: Path, sha_url: str, say=None) -> bool:
+def _verify_sha256_url(file_path: Path, sha_url: str, say=None) -> Optional[bool]:
     """Verify a downloaded file against its published .sha256sum(.txt) URL.
 
-    Mirrors the ffmpeg flow: a verification problem is reported but does not
-    abort the update (network mirrors sometimes lag the checksum endpoint).
+    Returns:
+        True  - digest matches, the archive is trustworthy.
+        False - digest MISMATCHES. The caller MUST abort: extracting and
+                executing an unverified binary defeats the whole check.
+        None  - the checksum could not be fetched at all (network / CDN lag).
+                Tolerated, because mirrors sometimes lag the checksum endpoint.
     """
     def msg(s):
         if say:
@@ -236,15 +240,19 @@ def _verify_sha256_url(file_path: Path, sha_url: str, say=None) -> bool:
         resp = requests.get(sha_url, timeout=15)
         resp.raise_for_status()
         expected = resp.text.strip().split()[0].lower()
+    except Exception as e:
+        logger.warning(f"[WebUI] sha256 check unavailable ({sha_url}): {e}")
+        return None
+    try:
         msg("🔐 Verifying download integrity...")
         actual = _sha256_of(file_path)
-        if expected == actual:
-            return True
-        msg("⚠️ SHA-256 verification failed, proceeding anyway...")
-        return False
     except Exception as e:
-        logger.warning(f"[WebUI] sha256 check failed ({sha_url}): {e}")
-        return False
+        logger.warning(f"[WebUI] sha256 of download failed: {e}")
+        return None
+    if expected == actual:
+        return True
+    msg("❌ SHA-256 verification failed - aborting update")
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -430,7 +438,8 @@ async def ytdlp_rollback_async() -> Dict[str, Any]:
 
     try:
         result = await asyncio.to_thread(ytdlp_rollback_sync, cb)
-        _emit("ytdlp", state="rolled_back" if result.get("success") else "failed" if result.get("success") else "failed",
+        # (was: "rolled_back" if success else "failed" if success else "failed")
+        _emit("ytdlp", state="rolled_back" if result.get("success") else "failed",
               message=result.get("version") or result.get("error"))
         return result
     finally:
@@ -663,7 +672,11 @@ def ffmpeg_update_sync(progress_cb=None) -> bool:
             progress_cb(str(msg))
 
     try:
-        extract_dir = Path(os.getenv("LOCALAPPDATA")) / "ffmpeg"
+        local_app_data = os.getenv("LOCALAPPDATA")
+        if not local_app_data:
+            say("❌ LOCALAPPDATA is not set - cannot locate the FFmpeg directory")
+            return False
+        extract_dir = Path(local_app_data) / "ffmpeg"
         extract_dir.mkdir(exist_ok=True)
 
         # Remember what is installed right now so a later rollback can restore
@@ -689,12 +702,16 @@ def ffmpeg_update_sync(progress_cb=None) -> bool:
                             say(f"  {pct}%")
                             last_pct = pct
             if HAS_FFMPEG_CORE and hasattr(_ffcore, "verify_sha256"):
+                say("🔐 Verifying download integrity...")
                 try:
-                    say("🔐 Verifying download integrity...")
-                    if not _ffcore.verify_sha256(temp, _ffcore.FFMPEG_ZIP_SHA256_URL):
-                        say("⚠️ SHA-256 verification failed, proceeding anyway...")
-                except Exception:
-                    pass
+                    ok = _ffcore.verify_sha256(temp, _ffcore.FFMPEG_ZIP_SHA256_URL)
+                except Exception as e:
+                    logger.warning(f"[WebUI] ffmpeg sha256 check unavailable: {e}")
+                    ok = None
+                if ok is False:
+                    # Never extract or put an unverified binary on PATH.
+                    say("❌ SHA-256 verification failed - aborting update")
+                    return False
             say("⚙ Extracting FFmpeg...")
             with zipfile.ZipFile(temp, "r") as zf:
                 zf.extractall(extract_dir)
@@ -900,7 +917,8 @@ def deno_upgrade_sync(progress_cb=None) -> Dict[str, Any]:
                         say(f"  {pct}%")
                         last_pct = pct
 
-        _verify_sha256_url(Path(temp_zip), DENO_SHA256_URL, say=say)
+        if _verify_sha256_url(Path(temp_zip), DENO_SHA256_URL, say=say) is False:
+            return {"success": False, "error": "sha256_mismatch"}
 
         say("⚙ Extracting Deno...")
         new_exe = None

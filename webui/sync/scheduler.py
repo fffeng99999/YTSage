@@ -69,9 +69,51 @@ async def _runner() -> None:
                     # run in a separate task so one slow sync doesn't stall others
                     asyncio.create_task(_run_schedule(s.copy()))
             await _maybe_daily_clean(now_ts)
+            await _maybe_cookie_sweep(now_ts)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[sync] scheduler tick failed: {e}")
         await asyncio.sleep(CHECK_EVERY)
+
+
+_COOKIE_SWEEP_KEY = "_last_cookie_sweep_date"
+# Only re-check a profile whose status is older than this.
+_COOKIE_SWEEP_MIN_AGE = 12 * 3600
+
+
+async def _maybe_cookie_sweep(now_ts: float) -> None:
+    """dysync Cookie 过期提醒, automated.
+
+    Upstream required a manual click on the cookie page. Once per day (and
+    only for profiles not checked in the last 12h) each configured cookie is
+    probed and the result persisted, so the overview banner and the run loop
+    can warn / skip before a scheduled sync wastes a whole pass.
+    """
+    try:
+        today = datetime.fromtimestamp(now_ts).strftime("%Y-%m-%d")
+        row = store._row("SELECT value FROM sync_settings WHERE key=?", (_COOKIE_SWEEP_KEY,))
+        if row and row["value"] and json.loads(row["value"]) == today:
+            return
+        store._exec(
+            "INSERT OR REPLACE INTO sync_settings (key,value) VALUES (?,?)",
+            (_COOKIE_SWEEP_KEY, json.dumps(today)),
+        )
+
+        from .routes import check_cookie  # local import: routes imports scheduler
+
+        for p in store.list_cookie_watch_profiles():
+            last = p.get("cookie_checked_at")
+            if last and (now_ts - float(last)) < _COOKIE_SWEEP_MIN_AGE:
+                continue
+            try:
+                res = await check_cookie(int(p["id"]))
+                if not res.get("cookie_valid"):
+                    logger.warning(
+                        f"[sync] cookie for profile #{p['id']} ({p.get('name')}) is invalid"
+                    )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[sync] cookie sweep failed for #{p['id']}: {e}")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[sync] cookie sweep failed: {e}")
 
 
 def _clean_marker() -> Optional[str]:
@@ -129,9 +171,24 @@ async def prune_old_logs() -> int:
     return await asyncio.to_thread(_prune_app_logs, days)
 
 
-def start_scheduler() -> None:
-    loop = asyncio.get_event_loop()
-    loop.create_task(_runner())
+# Held at module level so the scheduler task is not garbage-collected while
+# it is still running (a bare create_task() reference can be dropped).
+_runner_task: Optional[asyncio.Task] = None
+
+
+def start_scheduler() -> Optional[asyncio.Task]:
+    """Start the background scheduler. Must be called from a running loop.
+
+    Returns the task, or None when no loop is running.
+    """
+    global _runner_task
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        logger.warning("[WebUI] scheduler not started: no running event loop")
+        return None
+    _runner_task = loop.create_task(_runner())
+    return _runner_task
 
 
 def refresh_next_runs() -> None:

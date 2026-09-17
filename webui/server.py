@@ -24,7 +24,16 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from . import analysis_service, channel_service, cookie_store, history_service, log_service, playlist_export, system_service, updater_service
-from .auth import create_token, set_password, verify_password, verify_token
+from .auth import (
+    TOKEN_TTL_SECONDS,
+    clear_attempts,
+    create_token,
+    lockout_remaining,
+    register_failed_attempt,
+    set_password,
+    verify_password,
+    verify_token,
+)
 from .command_service import command_service
 from .download_manager import download_manager
 from .event_bus import bus
@@ -56,7 +65,7 @@ from .schemas import (
     YtdlpAutoUpdateRequest,
     YtdlpChannelRequest,
 )
-from .settings_service import build_download_defaults, get_all_settings, update_settings
+from .settings_service import SETTINGS_SCHEMA, build_download_defaults, get_all_settings, update_settings
 from .sync.routes import (
     router as sync_router,
     stream_router as sync_stream_router,
@@ -151,13 +160,32 @@ def _ensure_not_updating() -> None:
 # ---------------------------------------------------------------------------
 
 @app.post("/api/auth/login")
-async def login(req: LoginRequest):
+async def login(req: LoginRequest, request: Request):
     from . import config_store
     if not config_store.get_setup_state()["setup_complete"]:
         # First run: force the setup wizard (no default password accepted)
         raise HTTPException(status_code=428, detail="Setup required")
+
+    # Throttle brute-force attempts. Without this the (possibly default)
+    # password could be guessed freely - /api/auth/login had no rate limit.
+    client = request.client.host if request.client else "unknown"
+    locked = lockout_remaining(client)
+    if locked:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many failed attempts. Try again in {locked}s",
+            headers={"Retry-After": str(locked)},
+        )
     if verify_password(req.password):
-        return {"token": create_token(), "expires_in": 7 * 24 * 3600}
+        clear_attempts(client)
+        return {"token": create_token(), "expires_in": TOKEN_TTL_SECONDS}
+    retry = register_failed_attempt(client)
+    if retry:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many failed attempts. Try again in {retry}s",
+            headers={"Retry-After": str(retry)},
+        )
     raise HTTPException(status_code=401, detail="Invalid password")
 
 
@@ -207,6 +235,12 @@ async def setup_defaults():
 async def setup_complete(req: SetupCompleteRequest):
     """Public: finish the wizard - set password + choose config mode."""
     from . import config_store
+    # This endpoint is unauthenticated by necessity (there is no password
+    # yet), so it must close for good once the wizard ran. Leaving it open
+    # let anyone who could reach the port overwrite the administrator
+    # password - a first-install race / remote takeover.
+    if config_store.get_setup_state()["setup_complete"]:
+        raise HTTPException(status_code=403, detail="Setup already completed")
     if len(req.password) < 4:
         raise HTTPException(status_code=400, detail="web.password_too_short")
     if req.mode not in ("standalone", "shared"):
@@ -319,6 +353,10 @@ async def get_analysis(analysis_id: str, auth: dict = Depends(get_current_user))
 async def start_download(req: DownloadRequest, auth: dict = Depends(get_current_user)):
     """Start a new download. Returns job_id. Unset fields use config defaults."""
     _ensure_not_updating()
+    # The download manager recursively deletes .part/.ytdl/.temp files under
+    # the output directory, so the path has to be validated before use.
+    if not await asyncio.to_thread(system_service.is_download_dir_allowed, Path(req.path)):
+        raise HTTPException(status_code=400, detail="download path not allowed")
     defaults = await asyncio.to_thread(build_download_defaults)
     data = req.model_dump(exclude_none=True)
     # Only inject when the client omitted the field (None means "use config")
@@ -331,10 +369,17 @@ async def start_download(req: DownloadRequest, auth: dict = Depends(get_current_
         if data.get(key) is None:
             data[key] = defaults[key]
     # Retries: fall back to the global settings when the client omitted them.
+    # The official ConfigManager has no such key in shared mode, so fall back
+    # to the schema default as well (otherwise the setting silently does
+    # nothing even though the Settings page shows 10).
     if data.get("retries") is None:
         data["retries"] = cfg_get("download_retries")
+        if data["retries"] is None:
+            data["retries"] = SETTINGS_SCHEMA["download_retries"][1]
     if data.get("fragment_retries") is None:
         data["fragment_retries"] = cfg_get("fragment_retries")
+        if data["fragment_retries"] is None:
+            data["fragment_retries"] = SETTINGS_SCHEMA["fragment_retries"][1]
     try:
         job_id = await download_manager.start_download(data)
         return {"job_id": job_id}
@@ -565,7 +610,10 @@ async def download_file(
     from urllib.parse import quote
 
     p = Path(path)
-    if not p.is_file() or not await asyncio.to_thread(system_service.is_path_allowed, p):
+    # Strict check: only real download output locations. The looser
+    # is_path_allowed() also covers the home directory, which would let an
+    # authenticated caller pull down private keys or browser profiles.
+    if not await asyncio.to_thread(system_service.is_file_download_allowed, p):
         raise HTTPException(status_code=404, detail="File not found or path not allowed")
     media_type = guess_type(p.name)[0] or "application/octet-stream"
     return FileResponse(
@@ -635,6 +683,14 @@ async def command_run(req: CommandRunRequest, auth: dict = Depends(get_current_u
     command = strip_control_chars(req.command or "")
     url = strip_control_chars(req.url) if req.url else None
     path = req.path or await asyncio.to_thread(system_service.get_download_path)
+    if not await asyncio.to_thread(system_service.is_download_dir_allowed, Path(path)):
+        raise HTTPException(status_code=400, detail="download path not allowed")
+    # Even without a shell, yt-dlp has options that spawn processes or read
+    # arbitrary files (--exec, --config-location, --external-downloader, ...).
+    # Block them before the process is created.
+    blocked = command_service.find_blocked_option(command)
+    if blocked:
+        raise HTTPException(status_code=400, detail=f"option not allowed: {blocked}")
     exec_id = await command_service.run(command, url, path)
     return {"exec_id": exec_id}
 
@@ -777,9 +833,10 @@ async def health():
     missing = await asyncio.to_thread(missing_binaries)
 
     return {
+        # Note: no absolute binary paths here - /api/health is public and
+        # would otherwise disclose the host's directory layout.
         "status": "ok" if not missing else "degraded",
         "app_version": APP_VERSION,
-        "ytdlp_path": str(ytdlp_path),
         "ytdlp_version": ytdlp_version,
         "official_available": HAS_CONFIG,
         "history_available": HAS_HISTORY,

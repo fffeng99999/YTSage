@@ -122,13 +122,26 @@ def _which_ok(name: str) -> bool:
 # Path whitelist + reveal
 # ---------------------------------------------------------------------------
 
-def _allowed_roots() -> list:
-    roots = [USER_HOME_DIR, APP_LOG_DIR, Path(get_download_path())]
+def _app_dir() -> Optional[Path]:
     try:
         from .official_bridge import APP_DIR
-        roots.append(APP_DIR)
+
+        return Path(APP_DIR)
     except Exception:
-        pass
+        return None
+
+
+def _allowed_roots() -> list:
+    """Roots the browser may point ``reveal`` / ``open-folder`` at.
+
+    Deliberately NOT the whole home directory: that let a caller probe for the
+    existence of arbitrary files (``~/.ssh``, browser profiles, ...) through
+    the exists() check in reveal_in_folder().
+    """
+    roots = [APP_LOG_DIR, Path(get_download_path()), USER_HOME_DIR / "Downloads"]
+    app_dir = _app_dir()
+    if app_dir:
+        roots.append(app_dir)
     return [r.resolve() for r in roots if r]
 
 
@@ -142,6 +155,76 @@ def is_path_allowed(target: Path) -> bool:
     except Exception:
         return False
     for root in _allowed_roots():
+        try:
+            resolved.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+# OS-controlled locations that must never be used as a download target.
+_WIN_FORBIDDEN_PARTS = {
+    "windows", "program files", "program files (x86)", "programdata",
+    "system32", "syswow64", "$recycle.bin", "system volume information",
+    "recovery", "perflogs",
+}
+_POSIX_FORBIDDEN_DIRS = (
+    "/etc", "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32",
+    "/boot", "/dev", "/proc", "/sys", "/run", "/var", "/root", "/srv", "/opt",
+)
+
+
+def is_download_dir_allowed(target: Path) -> bool:
+    """Validate a download output directory.
+
+    The download manager runs a recursive cleanup of .part/.ytdl/.temp files
+    over this directory, so an unrestricted path let an authenticated caller
+    delete files anywhere on disk (and mkdir -p anything). We keep the
+    flexibility of choosing any folder, but block OS-controlled locations and
+    drive roots where a recursive scan would be catastrophic.
+    """
+    try:
+        raw = str(target).strip()
+        if not raw:
+            return False
+        p = Path(raw)
+        if not p.is_absolute():
+            return False
+        resolved = p.resolve()
+    except Exception:
+        return False
+    if resolved.exists() and not resolved.is_dir():
+        return False
+    # Bare drive root (C:\\) or filesystem root (/) - never scan those.
+    if resolved.as_posix().rstrip("/") == "" or str(resolved) == str(resolved.anchor):
+        return False
+    if {part.lower() for part in resolved.parts} & _WIN_FORBIDDEN_PARTS:
+        return False
+    posix_path = resolved.as_posix().lower()
+    for bad in _POSIX_FORBIDDEN_DIRS:
+        if posix_path == bad or posix_path.startswith(bad + "/"):
+            return False
+    return True
+
+
+def is_file_download_allowed(target: Path) -> bool:
+    """Stricter check for /api/download-file.
+
+    Only real download output locations are readable - the rest of the home
+    directory (private keys, cookies, browser profiles) must stay unreachable.
+    """
+    try:
+        resolved = target.resolve()
+    except Exception:
+        return False
+    if not resolved.is_file():
+        return False
+    roots = [Path(get_download_path()).resolve()]
+    app_dir = _app_dir()
+    if app_dir:
+        roots.append(app_dir.resolve())
+    for root in roots:
         try:
             resolved.relative_to(root)
             return True

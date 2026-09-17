@@ -26,6 +26,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -138,6 +139,10 @@ class DownloadJob:
     audio_normalization: bool = False
     filename_format: Optional[str] = None
     concurrent_fragments: int = 1
+    # Network resilience (module 7.3). None -> omit the flag and let yt-dlp
+    # use its own default; the API layer injects the global setting.
+    retries: Optional[int] = None
+    fragment_retries: Optional[int] = None
 
     # History metadata (official writes history from video_info)
     title: Optional[str] = None
@@ -435,6 +440,10 @@ class DownloadManager:
         # FIFO of job_ids waiting for a free slot in the global concurrency
         # cap (max_concurrent_downloads setting).
         self._queue: List[str] = []
+        # _jobs/_queue are read from worker threads (the updater polls
+        # active_count()) while the event loop mutates them, which raised
+        # "dictionary changed size during iteration". Guard every access.
+        self._lock = threading.RLock()
 
     # -- concurrency scheduling ---------------------------------------------
 
@@ -451,32 +460,43 @@ class DownloadManager:
         # not flipped to 'running' yet, so slots are reserved immediately.
         # Paused jobs keep their yt-dlp process alive (cooperative pause),
         # so they still occupy a concurrency slot.
-        return sum(1 for j in self._jobs.values() if j.status in ("pending", "running", "paused"))
+        with self._lock:
+            return sum(1 for j in self._jobs.values() if j.status in ("pending", "running", "paused"))
 
     def _pump(self) -> None:
         """Start queued jobs while slots are free."""
-        limit = self._max_concurrent()
-        while self._queue and self._running_count() < limit:
-            job_id = self._queue.pop(0)
-            job = self._jobs.get(job_id)
-            if not job or job.status != "queued":
-                continue
-            job.status = "pending"
+        with self._lock:
+            limit = self._max_concurrent()
+            pending_starts: List[DownloadJob] = []
+            while self._queue and self._running_count() < limit:
+                job_id = self._queue.pop(0)
+                job = self._jobs.get(job_id)
+                if not job or job.status != "queued":
+                    continue
+                job.status = "pending"
+                pending_starts.append(job)
+        # create_task outside the lock: it schedules a callback and is fine
+        # either way, but keeping the critical section tiny avoids surprises.
+        for job in pending_starts:
             asyncio.create_task(self._run_download(job))
 
     # -- introspection ------------------------------------------------------
 
     def active_count(self) -> int:
-        return sum(1 for j in self._jobs.values() if j.status in ("queued", "pending", "running", "paused"))
+        with self._lock:
+            return sum(1 for j in self._jobs.values() if j.status in ("queued", "pending", "running", "paused"))
 
     def is_updating_blocked(self) -> bool:
         return self.active_count() > 0
 
     def list_jobs(self) -> List[Dict[str, Any]]:
-        return [self._job_to_dict(j) for j in self._jobs.values()]
+        with self._lock:
+            jobs = list(self._jobs.values())
+        return [self._job_to_dict(j) for j in jobs]
 
     def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
-        job = self._jobs.get(job_id)
+        with self._lock:
+            job = self._jobs.get(job_id)
         return self._job_to_dict(job) if job else None
 
     @staticmethod
@@ -511,9 +531,11 @@ class DownloadManager:
         Used by GET /api/tasks/active so the frontend can resync after a page
         refresh or WebSocket reconnect without waiting for the next event.
         """
+        with self._lock:
+            jobs = list(self._jobs.values())
         return [
             self._job_to_dict(j)
-            for j in self._jobs.values()
+            for j in jobs
             if j.status in ("queued", "pending", "running", "paused")
         ]
 
@@ -533,8 +555,9 @@ class DownloadManager:
 
         job = DownloadJob(**{k: v for k, v in job_data.items() if k in DownloadJob.__dataclass_fields__})
         job.status = "queued"
-        self._jobs[job_id] = job
-        self._queue.append(job_id)
+        with self._lock:
+            self._jobs[job_id] = job
+            self._queue.append(job_id)
 
         job._subtitle_files_before = _snapshot_subtitle_files(job.path)
 
@@ -543,14 +566,18 @@ class DownloadManager:
         return job_id
 
     async def cancel(self, job_id: str) -> bool:
-        job = self._jobs.get(job_id)
+        with self._lock:
+            job = self._jobs.get(job_id)
         if not job:
             return False
         job._cancelled = True
         job._paused = False
-        if job_id in self._queue:
-            # Never started: drop it from the queue and finish it here.
-            self._queue.remove(job_id)
+        with self._lock:
+            queued = job_id in self._queue
+            if queued:
+                # Never started: drop it from the queue and finish it here.
+                self._queue.remove(job_id)
+        if queued:
             job.status = "cancelled"
             throttled.flush(job_id, {"type": "job_update", "job": self._job_to_dict(job)})
             bus.publish({
@@ -568,7 +595,8 @@ class DownloadManager:
         return True
 
     async def pause(self, job_id: str) -> bool:
-        job = self._jobs.get(job_id)
+        with self._lock:
+            job = self._jobs.get(job_id)
         if not job or job.status != "running":
             return False
         job._paused = True
@@ -577,7 +605,8 @@ class DownloadManager:
         return True
 
     async def resume(self, job_id: str) -> bool:
-        job = self._jobs.get(job_id)
+        with self._lock:
+            job = self._jobs.get(job_id)
         if not job or job.status != "paused":
             return False
         job._paused = False
@@ -586,16 +615,18 @@ class DownloadManager:
         return True
 
     async def remove_job(self, job_id: str) -> bool:
-        job = self._jobs.get(job_id)
+        with self._lock:
+            job = self._jobs.get(job_id)
         if not job:
             return False
         # Kill first if still active (prevents orphan processes)
         if job.status in ("queued", "pending", "running", "paused"):
             await self.cancel(job_id)
-        if job_id in self._queue:
-            self._queue.remove(job_id)
+        with self._lock:
+            if job_id in self._queue:
+                self._queue.remove(job_id)
+            self._jobs.pop(job_id, None)
         throttled.cleanup(job_id)
-        del self._jobs[job_id]
         bus.publish({"type": "job_removed", "job_id": job_id})
         self._pump()
         return True
@@ -653,112 +684,140 @@ class DownloadManager:
     # -- execution ----------------------------------------------------------
 
     async def _run_download(self, job: DownloadJob) -> None:
-        if job._cancelled:
-            throttled.cleanup(job.job_id)
-            return
-        job.status = "running"
-        cmd = build_ytdlp_command(job)
-        cmd_str = " ".join(shlex.quote(a) for a in cmd)
-        logger.info(f"[WebUI] Starting download: {cmd_str}")
+        """Run one job to completion.
 
-        kwargs: Dict[str, Any] = {
-            "stdout": asyncio.subprocess.PIPE,
-            "stderr": asyncio.subprocess.STDOUT,
-        }
-        if sys.platform == "win32":
-            # CREATE_NEW_PROCESS_GROUP isolates the tree so taskkill /T can
-            # take down yt-dlp AND its ffmpeg children without killing us.
-            kwargs["creationflags"] = (
-                SUBPROCESS_CREATIONFLAGS | subprocess.CREATE_NEW_PROCESS_GROUP
-            )
-        else:
-            kwargs["start_new_session"] = True  # own process group for killpg
-
-        job._process = await asyncio.create_subprocess_exec(*cmd, **kwargs)
-        throttled.flush(job.job_id, {"type": "job_update", "job": self._job_to_dict(job)})
-
+        The whole body is guarded. Anything raised before the process even
+        starts (malformed command, missing yt-dlp binary, ...) used to kill the
+        asyncio task silently, which left the concurrency slot occupied and
+        stalled every queued job forever. The ``finally`` block therefore
+        always emits a terminal event, kills any stray process and releases
+        the slot via :meth:`_pump`.
+        """
         try:
-            assert job._process.stdout is not None
-            while True:
-                if job._cancelled:
-                    break
-
-                # Cooperative pause (official: process keeps running, only the
-                # read loop suspends - ytsage_downloader.py L556-557)
-                while job._paused and not job._cancelled:
-                    await asyncio.sleep(0.2)
-                if job._cancelled:
-                    break
-
-                try:
-                    line = await asyncio.wait_for(job._process.stdout.readline(), timeout=1.0)
-                except asyncio.TimeoutError:
-                    continue
-                if not line:
-                    break
-                text = decode_output(line).strip()
-                if text:
-                    await self._parse_line(job, text)
-        except Exception as e:
-            logger.error(f"[WebUI] Download loop error: {e}")
-            job.error = str(e)
-            job.status = "error"
-
-        # Ensure process is gone
-        if job._process and job._process.returncode is None:
             if job._cancelled:
-                await self._terminate_process_tree(job._process)
+                job.status = "cancelled"
+                return
+
+            job.status = "running"
+            cmd = build_ytdlp_command(job)
+            cmd_str = " ".join(shlex.quote(a) for a in cmd)
+            logger.info(f"[WebUI] Starting download: {cmd_str}")
+
+            kwargs: Dict[str, Any] = {
+                "stdout": asyncio.subprocess.PIPE,
+                "stderr": asyncio.subprocess.STDOUT,
+            }
+            if sys.platform == "win32":
+                # CREATE_NEW_PROCESS_GROUP isolates the tree so taskkill /T can
+                # take down yt-dlp AND its ffmpeg children without killing us.
+                kwargs["creationflags"] = (
+                    SUBPROCESS_CREATIONFLAGS | subprocess.CREATE_NEW_PROCESS_GROUP
+                )
             else:
-                try:
-                    await asyncio.wait_for(job._process.wait(), timeout=5)
-                except asyncio.TimeoutError:
+                kwargs["start_new_session"] = True  # own process group for killpg
+
+            job._process = await asyncio.create_subprocess_exec(*cmd, **kwargs)
+            throttled.flush(job.job_id, {"type": "job_update", "job": self._job_to_dict(job)})
+
+            try:
+                assert job._process.stdout is not None
+                while True:
+                    if job._cancelled:
+                        break
+
+                    # Cooperative pause (official: process keeps running, only the
+                    # read loop suspends - ytsage_downloader.py L556-557)
+                    while job._paused and not job._cancelled:
+                        await asyncio.sleep(0.2)
+                    if job._cancelled:
+                        break
+
+                    try:
+                        line = await asyncio.wait_for(job._process.stdout.readline(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        continue
+                    if not line:
+                        break
+                    text = decode_output(line).strip()
+                    if text:
+                        await self._parse_line(job, text)
+            except Exception as e:
+                logger.error(f"[WebUI] Download loop error: {e}")
+                job.error = str(e)
+                job.status = "error"
+
+            # Ensure process is gone
+            if job._process and job._process.returncode is None:
+                if job._cancelled:
                     await self._terminate_process_tree(job._process)
+                else:
+                    try:
+                        await asyncio.wait_for(job._process.wait(), timeout=5)
+                    except asyncio.TimeoutError:
+                        await self._terminate_process_tree(job._process)
 
-        rc = job._process.returncode if job._process else -1
+            rc = job._process.returncode if job._process else -1
 
-        if job._cancelled:
-            job.status = "cancelled"
-            await asyncio.to_thread(cleanup_partial_files, job.path)
-        elif rc == 0 or (job.is_playlist and rc != 0 and job.current_filename is not None):
-            job.progress = 100.0
-            self._find_final_file(job)
-            # --ignore-errors keeps the exit code at 0 even when the media
-            # body itself failed; require a real output file to call it done.
-            if not job.last_file_path or not Path(job.last_file_path).exists():
+            if job._cancelled:
+                job.status = "cancelled"
+                await asyncio.to_thread(cleanup_partial_files, job.path)
+            elif rc == 0 or (job.is_playlist and rc != 0 and job.current_filename is not None):
+                job.progress = 100.0
+                self._find_final_file(job)
+                # --ignore-errors keeps the exit code at 0 even when the media
+                # body itself failed; require a real output file to call it done.
+                if not job.last_file_path or not Path(job.last_file_path).exists():
+                    job.status = "error"
+                    if not job.error:
+                        job.error = "yt-dlp finished without producing a media file"
+                else:
+                    job.status = "completed"
+                    # Save thumbnail into the per-video folder (official: ytsage_gui_main.py L894-901)
+                    if job.save_thumbnail and job.thumbnail_url:
+                        try:
+                            from .thumbnail_service import save_thumbnail_to_dir
+                            await asyncio.to_thread(
+                                save_thumbnail_to_dir,
+                                job.thumbnail_url,
+                                str(Path(job.last_file_path).parent),
+                                job.title or "thumbnail",
+                            )
+                        except Exception as e:
+                            logger.warning(f"[WebUI] save thumbnail failed: {e}")
+                    if job.merge_subs and job.subtitle_langs:
+                        await asyncio.to_thread(cleanup_merged_subtitle_files, job.path, job._subtitle_files_before)
+                    await self._write_history(job)
+            else:
                 job.status = "error"
                 if not job.error:
-                    job.error = "yt-dlp finished without producing a media file"
-            else:
-                job.status = "completed"
-                # Save thumbnail into the per-video folder (official: ytsage_gui_main.py L894-901)
-                if job.save_thumbnail and job.thumbnail_url:
-                    try:
-                        from .thumbnail_service import save_thumbnail_to_dir
-                        await asyncio.to_thread(
-                            save_thumbnail_to_dir,
-                            job.thumbnail_url,
-                            str(Path(job.last_file_path).parent),
-                            job.title or "thumbnail",
-                        )
-                    except Exception as e:
-                        logger.warning(f"[WebUI] save thumbnail failed: {e}")
-                if job.merge_subs and job.subtitle_langs:
-                    await asyncio.to_thread(cleanup_merged_subtitle_files, job.path, job._subtitle_files_before)
-                await self._write_history(job)
-        else:
+                    job.error = f"yt-dlp exited with code {rc}"
+        except Exception as e:
+            logger.error(f"[WebUI] Download task failed: {e}")
+            job.error = str(e)
             job.status = "error"
-            if not job.error:
-                job.error = f"yt-dlp exited with code {rc}"
-
-        throttled.flush(job.job_id, {"type": "job_update", "job": self._job_to_dict(job)})
-        bus.publish({
-            "type": "job_finished",
-            "job": self._job_to_dict(job),
-            "success": job.status == "completed",
-        })
-        throttled.cleanup(job.job_id)
-        # Slot released: start the next queued job, if any.
-        self._pump()
+        finally:
+            # Never leave the process behind when the task died early.
+            if job._process and job._process.returncode is None:
+                try:
+                    await self._terminate_process_tree(job._process)
+                except Exception:
+                    pass
+            if job.status not in ("completed", "error", "cancelled"):
+                job.status = "error"
+                if not job.error:
+                    job.error = "download task ended unexpectedly"
+            try:
+                throttled.flush(job.job_id, {"type": "job_update", "job": self._job_to_dict(job)})
+                bus.publish({
+                    "type": "job_finished",
+                    "job": self._job_to_dict(job),
+                    "success": job.status == "completed",
+                })
+            except Exception:
+                pass
+            throttled.cleanup(job.job_id)
+            # Slot released: start the next queued job, if any.
+            self._pump()
 
     async def _write_history(self, job: DownloadJob) -> None:
         """Official: download_finished -> HistoryManager.add_entry (main.py L1004-1042)."""

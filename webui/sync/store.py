@@ -148,6 +148,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("records", "thumbnail_url", "TEXT"),
         ("records", "deleted_at", "REAL"),
         ("records", "nfo_generated", "INTEGER DEFAULT 0"),
+        # dysync parity: cookie expiry is watched automatically, not only when
+        # the user opens the cookie page.
+        ("profiles", "cookie_invalid", "INTEGER DEFAULT 0"),
+        ("profiles", "cookie_checked_at", "REAL"),
+        ("profiles", "cookie_check_error", "TEXT"),
     ]
     for table, column, col_type in migrations:
         try:
@@ -190,11 +195,57 @@ def _execmany(sql: str, seq) -> None:
         _connect().commit()
 
 
+def _table_columns(table: str) -> set:
+    """Real column names of ``table`` (read fresh so migrations are picked up)."""
+    return {r["name"] for r in _rows(f"PRAGMA table_info({table})")}
+
+
+def _assignments(table: str, data: Dict[str, Any]):
+    """Build a whitelisted "col=?, col=?" SET clause.
+
+    Several update helpers are fed caller-supplied dicts (import_data accepts
+    arbitrary JSON), so column names must never reach the SQL string before
+    being checked against the live table schema.
+    """
+    cols = _table_columns(table)
+    items = [(k, v) for k, v in data.items() if k in cols]
+    if not items:
+        return "", ()
+    return ", ".join(f"{k}=?" for k, _ in items), tuple(v for _, v in items)
+
+
 # ---------------------------------------------------------------------------
 # Profiles
 # ---------------------------------------------------------------------------
 
 DEFAULT_DEDUP_PRIORITY = ["liked", "favorites", "playlist", "channel", "subscriptions"]
+
+
+def _normalize_dedup_priority(value: Any) -> str:
+    """Serialize dedup_priority to JSON text, accepting list OR str.
+
+    Import/export round-trips pass an already-encoded string. The old code
+    ran json.dumps on it unconditionally, producing a JSON string inside a
+    JSON string - after importing, json.loads returned a str and the engine's
+    list() split it into single characters, silently breaking dedup priority.
+    """
+    if value is None:
+        items = DEFAULT_DEDUP_PRIORITY
+    elif isinstance(value, str):
+        s = value.strip()
+        if not s:
+            items = DEFAULT_DEDUP_PRIORITY
+        else:
+            try:
+                parsed = json.loads(s)
+                items = parsed if isinstance(parsed, list) else DEFAULT_DEDUP_PRIORITY
+            except (json.JSONDecodeError, ValueError):
+                items = [p.strip() for p in s.split(",") if p.strip()] or DEFAULT_DEDUP_PRIORITY
+    elif isinstance(value, (list, tuple)):
+        items = list(value)
+    else:
+        items = DEFAULT_DEDUP_PRIORITY
+    return json.dumps(items, ensure_ascii=False)
 
 
 def list_profiles() -> List[Dict[str, Any]]:
@@ -222,7 +273,7 @@ def create_profile(data: Dict[str, Any]) -> int:
             int(data.get("recent_limit") or 20),
             int(data.get("folder_by_title", 1)),
             int(data.get("enabled", 1)),
-            json.dumps(data.get("dedup_priority") or DEFAULT_DEDUP_PRIORITY, ensure_ascii=False),
+            _normalize_dedup_priority(data.get("dedup_priority")),
             now(), now(),
         ),
     )
@@ -232,13 +283,13 @@ def update_profile(pid: int, data: Dict[str, Any]) -> None:
     allowed = dict(data)
     allowed.pop("id", None)
     if "dedup_priority" in allowed:
-        allowed["dedup_priority"] = json.dumps(allowed["dedup_priority"] or DEFAULT_DEDUP_PRIORITY, ensure_ascii=False)
+        allowed["dedup_priority"] = _normalize_dedup_priority(allowed["dedup_priority"])
     for b in ("only_recent", "folder_by_title", "enabled"):
         if b in allowed:
             allowed[b] = int(bool(allowed[b]))
-    if allowed:
-        sets = ", ".join(f"{k}=?" for k in allowed)
-        _exec(f"UPDATE profiles SET {sets}, updated_at=? WHERE id=?", (*allowed.values(), now(), pid))
+    sets, values = _assignments("profiles", allowed)
+    if sets:
+        _exec(f"UPDATE profiles SET {sets}, updated_at=? WHERE id=?", (*values, now(), pid))
 
 
 def delete_profile(pid: int) -> None:
@@ -281,9 +332,9 @@ def update_target(tid: int, data: Dict[str, Any]) -> None:
     allowed.pop("id", None)
     if "enabled" in allowed:
         allowed["enabled"] = int(bool(allowed["enabled"]))
-    if allowed:
-        sets = ", ".join(f"{k}=?" for k in allowed)
-        _exec(f"UPDATE targets SET {sets} WHERE id=?", (*allowed.values(), tid))
+    sets, values = _assignments("targets", allowed)
+    if sets:
+        _exec(f"UPDATE targets SET {sets} WHERE id=?", (*values, tid))
 
 
 def delete_target(tid: int) -> None:
@@ -336,8 +387,51 @@ def list_records(
     return {"entries": rows, "total": total, "page": page, "limit": limit}
 
 
-def get_record(video_id: str) -> Optional[Dict[str, Any]]:
-    return _row("SELECT * FROM records WHERE video_id=?", (video_id,))
+def get_record(video_id: str, profile_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    """Look up a record by video id, optionally scoped to one profile.
+
+    records.video_id is UNIQUE, so a video synced by two accounts is stored
+    once. Passing profile_id lets callers detect that the existing row belongs
+    to another account instead of silently re-owning it (dysync keeps each
+    account's library separate).
+    """
+    if profile_id is None:
+        return _row("SELECT * FROM records WHERE video_id=?", (video_id,))
+    return _row("SELECT * FROM records WHERE video_id=? AND profile_id=?", (video_id, profile_id))
+
+
+def set_cookie_status(pid: int, invalid: bool, error: str = "") -> None:
+    """Persist the outcome of a cookie probe (dysync: Cookie 过期提醒)."""
+    _exec(
+        "UPDATE profiles SET cookie_invalid=?, cookie_checked_at=?, cookie_check_error=?, updated_at=? WHERE id=?",
+        (int(bool(invalid)), now(), (error or "")[:500], now(), pid),
+    )
+
+
+def list_cookie_watch_profiles() -> List[Dict[str, Any]]:
+    """Profiles whose cookie is configured and worth auto-checking."""
+    return _rows(
+        "SELECT * FROM profiles WHERE enabled=1 AND cookie_source IN ('file','browser','global')"
+    )
+
+
+def list_failed_records(profile_id: Optional[int] = None, limit: int = 20) -> List[Dict[str, Any]]:
+    """Records whose download failed - dysync 批量重下 re-queues these."""
+    sql = "SELECT * FROM records WHERE status='failed' AND deleted_at IS NULL"
+    params: List[Any] = []
+    if profile_id is not None:
+        sql += " AND profile_id=?"
+        params.append(profile_id)
+    sql += " ORDER BY id LIMIT ?"
+    params.append(max(1, int(limit)))
+    return _rows(sql, tuple(params))
+
+
+def count_target_records(target_id: int, include_deleted: bool = False) -> int:
+    """Records already filed under a target - used for S01E01 episode numbers."""
+    where = "WHERE target_id=?" if include_deleted else "WHERE target_id=? AND deleted_at IS NULL"
+    row = _row(f"SELECT COUNT(*) c FROM records {where}", (target_id,))
+    return int(row["c"]) if row else 0
 
 
 def get_record_by_db_id(rid: int) -> Optional[Dict[str, Any]]:
@@ -385,8 +479,13 @@ def delete_records(ids: List[int]) -> int:
 
 def delete_records_by_author(channel: str) -> int:
     """Delete all records of one author/channel (dysync: DeleteByAuthor)."""
-    cur = _connect().execute("DELETE FROM records WHERE channel=?", (channel,))
-    _connect().commit()
+    # Goes through _exec: the previous version used the raw connection and
+    # therefore ran outside _lock, racing with every other writer.
+    cur = None
+    with _lock:
+        conn = _connect()
+        cur = conn.execute("DELETE FROM records WHERE channel=?", (channel,))
+        conn.commit()
     return cur.rowcount or 0
 
 
@@ -497,9 +596,9 @@ def update_schedule(sid: int, data: Dict[str, Any]) -> None:
     allowed.pop("id", None)
     if "enabled" in allowed:
         allowed["enabled"] = int(bool(allowed["enabled"]))
-    if allowed:
-        sets = ", ".join(f"{k}=?" for k in allowed)
-        _exec(f"UPDATE schedules SET {sets} WHERE id=?", (*allowed.values(), sid))
+    sets, values = _assignments("schedules", allowed)
+    if sets:
+        _exec(f"UPDATE schedules SET {sets} WHERE id=?", (*values, sid))
 
 
 def delete_schedule(sid: int) -> None:
@@ -554,6 +653,15 @@ DEFAULT_SETTINGS = {
     "resolution": "1080",         # sync download quality cap (px)
     "save_thumbnail": True,       # keep per-video thumbnail next to the file
     "save_description": False,    # write a .description sidecar
+    # --- dysync parity: anti-bot / rate control -------------------------
+    "anti_bot_enabled": True,     # spread requests + sleep like dysync does
+    "sleep_min": 2,               # seconds (dysync uses random 2-9s)
+    "sleep_max": 9,
+    "ua_disguise": True,          # send a browser User-Agent (dysync UA 伪装)
+    "user_agent": "",             # empty -> built-in default UA
+    # --- dysync parity: episode / series handling -----------------------
+    "episode_naming": True,       # S01E01 prefix for series/mix targets
+    "retry_failed": True,         # re-queue failed records on the next run
 }
 
 
@@ -656,15 +764,19 @@ def list_deleted_records(page: int = 1, limit: int = 20) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def upsert_daily_stats(date_str: str, data: Dict[str, Any]) -> None:
+    cols_known = _table_columns("sync_daily_stats")
+    safe = {k: v for k, v in data.items() if k in cols_known}
+    if not safe:
+        return
     existing = _row("SELECT date FROM sync_daily_stats WHERE date=?", (date_str,))
     if existing:
-        sets = ", ".join(f"{k}=?" for k in data.keys())
-        _exec(f"UPDATE sync_daily_stats SET {sets} WHERE date=?", (*data.values(), date_str))
+        sets = ", ".join(f"{k}=?" for k in safe)
+        _exec(f"UPDATE sync_daily_stats SET {sets} WHERE date=?", (*safe.values(), date_str))
     else:
-        cols = ", ".join(data.keys())
-        placeholders = ", ".join("?" * len(data))
+        cols = ", ".join(safe.keys())
+        placeholders = ", ".join("?" * len(safe))
         _exec(f"INSERT INTO sync_daily_stats (date, {cols}) VALUES (?, {placeholders})",
-              (date_str, *data.values()))
+              (date_str, *safe.values()))
 
 
 def get_daily_stats(days: int = 7) -> List[Dict[str, Any]]:

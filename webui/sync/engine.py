@@ -16,6 +16,7 @@ once - the target with the highest priority (profile.dedup_priority) wins.
 import asyncio
 import json
 import logging
+import random
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -36,6 +37,118 @@ KIND_URLS = {
     "favorites": "https://www.youtube.com/playlist?list=FL",
     "subscriptions": "https://www.youtube.com/feed/subscriptions",
 }
+
+# dysync-parity kinds. YouTube has no 抖音-style "mix"/"short drama", so:
+#   mix     -> YouTube Mix / auto-generated radio list (RD...) or any mixed list
+#   series  -> a playlist treated as a series: gets S01E01 numbering + TV NFO
+#   posts   -> channel community posts (experimental: extractor support varies)
+EPISODE_KINDS = ("series", "mix")
+ALL_KINDS = (
+    "playlist", "liked", "channel", "subscriptions", "favorites",
+    "mix", "series", "posts",
+)
+
+# Browser-like UA used when UA disguise is on (dysync: UA 伪装).
+_DEFAULT_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
+
+def _anti_bot_options(settings: Dict[str, Any]) -> List[str]:
+    """dysync 风控规避: random delays + UA disguise.
+
+    dysync sleeps a random 2-9s between page fetches and spoofs the UA to look
+    like a normal browser. yt-dlp can do both natively:
+      --sleep-requests                    pause between HTTP requests (listing)
+      --sleep-interval/--max-sleep-interval   random pause before downloads
+    """
+    if not settings.get("anti_bot_enabled", True):
+        return []
+    try:
+        lo = max(0, int(settings.get("sleep_min") or 0))
+        hi = max(0, int(settings.get("sleep_max") or 0))
+    except (TypeError, ValueError):
+        lo = hi = 0
+    if hi < lo:
+        lo, hi = hi, lo
+    opts: List[str] = []
+    if lo:
+        opts += ["--sleep-requests", str(lo)]
+    if hi > lo:
+        opts += ["--sleep-interval", str(lo), "--max-sleep-interval", str(hi)]
+    if settings.get("ua_disguise", True):
+        ua = str(settings.get("user_agent") or "").strip() or _DEFAULT_UA
+        opts += ["--user-agent", ua]
+    return opts
+
+
+def _global_download_defaults() -> Dict[str, Any]:
+    """App-wide download settings (proxy / rate limit / retries).
+
+    sync used to hand-build every download job, which silently bypassed the
+    global rate limit, proxy and retry configuration used by the normal
+    download path.
+    """
+    out: Dict[str, Any] = {}
+    try:
+        from ..settings_service import build_download_defaults
+
+        out.update(build_download_defaults() or {})
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[sync] cannot read global download defaults: {e}")
+    try:
+        from ..official_bridge import cfg_get
+
+        out.setdefault("retries", cfg_get("download_retries"))
+        out.setdefault("fragment_retries", cfg_get("fragment_retries"))
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def _naming_template(
+    profile: Dict[str, Any], target: Dict[str, Any], settings: Dict[str, Any], episode: int
+) -> str:
+    """Output file name template (dysync: 是否直接用视频标题做文件名 + S01E01).
+
+    - folder_by_title -> plain "%(title)s" (no id suffix), like dysync's option.
+    - series / mix    -> "S01E01_..." prefix, continuing from what is on disk.
+    """
+    if profile.get("folder_by_title"):
+        base = "%(title)s.%(ext)s"
+    else:
+        base = settings.get("video_naming_template") or "%(title)s_[%(id)s].%(ext)s"
+    if settings.get("episode_naming", True) and (target.get("kind") or "") in EPISODE_KINDS:
+        base = f"S01E{episode:02d}_{base}"
+    return base
+
+
+def _jitter(settings: Dict[str, Any]) -> float:
+    """Random pause in [sleep_min, sleep_max] - dysync's anti-ban throttling."""
+    if not settings.get("anti_bot_enabled", True):
+        return 0.0
+    try:
+        lo = max(0.0, float(settings.get("sleep_min") or 0))
+        hi = max(lo, float(settings.get("sleep_max") or 0))
+    except (TypeError, ValueError):
+        return 0.0
+    return random.uniform(lo, hi) if hi > lo else lo
+
+
+def _file_alive(rec: Dict[str, Any]) -> bool:
+    """True when the recorded file still exists.
+
+    Cheaper and more reliable than rescanning the profile tree, and it keeps
+    working when folder_by_title strips the [video_id] from the file name.
+    """
+    fp = rec.get("file_path")
+    if not fp:
+        return False
+    try:
+        return Path(fp).is_file()
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _extract_video_id(url: Optional[str]) -> Optional[str]:
@@ -77,12 +190,17 @@ def _target_url(t: Dict[str, Any]) -> str:
     return (t.get("url") or KIND_URLS.get(t.get("kind")) or "").strip()
 
 
-def _list_entries(url: str, auth_opts: List[str], playlist_end: Optional[int]) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+def _list_entries(
+    url: str,
+    auth_opts: List[str],
+    playlist_end: Optional[int],
+    extra_opts: Optional[List[str]] = None,
+) -> Tuple[List[Dict[str, Any]], Optional[str]]:
     """Flat playlist listing. Returns (entries, error)."""
     cmd = [get_yt_dlp_path(), "--dump-single-json", "--flat-playlist", "--no-warnings"]
     if playlist_end:
         cmd += ["--playlist-end", str(playlist_end)]
-    cmd += auth_opts + [url]
+    cmd += list(extra_opts or []) + auth_opts + [url]
     try:
         result = _sync_run(cmd, timeout=300)
     except Exception as e:
@@ -152,7 +270,9 @@ def _find_existing_file(profile: Dict[str, Any], video_id: str) -> Optional[str]
     return None
 
 
-_KIND_RANK_DEFAULT = ("liked", "favorites", "playlist", "channel", "subscriptions")
+_KIND_RANK_DEFAULT = (
+    "liked", "favorites", "playlist", "channel", "subscriptions", "mix", "series", "posts",
+)
 
 
 class SyncEngine:
@@ -165,8 +285,10 @@ class SyncEngine:
     def ensure_subscribe(self) -> None:
         if self._subscribed:
             return
+        # get_event_loop() is deprecated (and raises when no loop is running);
+        # this is always called from a coroutine, so the running loop is there.
+        loop = asyncio.get_running_loop()
         self._subscribed = True
-        loop = asyncio.get_event_loop()
 
         async def _listen():
             q = bus.subscribe()
@@ -220,6 +342,14 @@ class SyncEngine:
                 try:
                     from . import nfo_service
                     nfo_service.generate_nfo_for_video(video_id)
+                    # dysync 合集/短剧: series & mix folders also need a
+                    # tvshow.nfo so Emby/Jellyfin groups them as a show.
+                    if rec.get("kind") in ("series", "mix"):
+                        t = store.get_target(rec["target_id"]) if rec.get("target_id") else None
+                        if t:
+                            nfo_service.ensure_tvshow_nfo(
+                                t, Path(job["last_file_path"]).parent
+                            )
                 except Exception as e:
                     logger.warning(f"[sync] NFO generation failed for {video_id}: {e}")
 
@@ -271,16 +401,27 @@ class SyncEngine:
             settings = store.get_all_settings()
             auto_distinct = bool(settings.get("auto_distinct", True))
 
+            anti_bot = _anti_bot_options(settings)
+            auth_opts = _build_auth_options(profile)
+
             # 1) collect flat entries per target
             target_entries: Dict[int, List[Dict[str, Any]]] = {}
-            for t in targets:
+            for idx, t in enumerate(targets):
                 url = _target_url(t)
                 if not url:
                     continue
+                # dysync spreads page fetches out; the pause also yields the
+                # event loop between targets (listing runs in a worker thread).
+                if idx and settings.get("anti_bot_enabled", True):
+                    pause = _jitter(settings)
+                    if pause:
+                        await asyncio.sleep(pause)
                 recent_limit = None
                 if (t.get("sync_mode") or "sync") != "full_sync" and profile.get("only_recent"):
                     recent_limit = int(profile.get("recent_limit") or 20)
-                entries, err = _list_entries(url, _build_auth_options(profile), recent_limit)
+                entries, err = await asyncio.to_thread(
+                    _list_entries, url, auth_opts, recent_limit, anti_bot
+                )
                 if err:
                     logger.warning(f"[sync] target #{t['id']} ({t.get('title')}) failed: {err}")
                     failed += 1
@@ -300,6 +441,48 @@ class SyncEngine:
 
             # 3) decide download / skip
             max_new = int(settings.get("max_sync_per_run") or 50)
+
+            # dysync 批量重下: give previously failed records another chance
+            # before spending the run's budget on brand-new ones.
+            episode_counters: Dict[int, int] = {}
+
+            def _next_episode(target_id: int) -> int:
+                cur = episode_counters.get(target_id)
+                if cur is None:
+                    cur = store.count_target_records(target_id) + 1
+                episode_counters[target_id] = cur + 1
+                return cur
+
+            if settings.get("retry_failed", True):
+                for rec in store.list_failed_records(profile_id, limit=max_new):
+                    if new_count >= max_new:
+                        break
+                    t = next((x for x in targets if x["id"] == rec.get("target_id")), None)
+                    if t is None:
+                        continue
+                    dest = None
+                    if rec.get("file_path"):
+                        try:
+                            dest = str(Path(rec["file_path"]).parent)
+                        except Exception:  # noqa: BLE001
+                            dest = None
+                    total += 1
+                    store.upsert_record({
+                        "video_id": rec["video_id"],
+                        "video_title": rec.get("video_title"),
+                        "channel": rec.get("channel"),
+                        "url": rec.get("url") or f"https://www.youtube.com/watch?v={rec['video_id']}",
+                        "kind": rec.get("kind") or t.get("kind"),
+                        "profile_id": profile_id, "target_id": t.get("id"),
+                        "status": "queued",
+                        "thumbnail_url": rec.get("thumbnail_url") or _thumb_url(rec["video_id"]),
+                    })
+                    await self._enqueue_download(
+                        profile, t, rec["video_id"],
+                        dest_folder=dest, episode=_next_episode(t["id"]),
+                    )
+                    new_count += 1
+
             for vid_id, (t, entry) in chosen.items():
                 total += 1
                 if store.is_excluded(vid_id):
@@ -310,11 +493,20 @@ class SyncEngine:
                     # soft-deleted: keep it hidden, don't re-download silently
                     skipped += 1
                     continue
-                if rec and rec.get("status") in ("downloaded", "queued", "running"):
+                if rec and rec.get("profile_id") not in (None, profile_id):
+                    # records.video_id is UNIQUE - another account owns this
+                    # row. dysync keeps each account's archive separate, so do
+                    # not re-own (and effectively steal) it.
+                    skipped += 1
+                    continue
+                if rec and rec.get("status") in ("queued", "running"):
+                    skipped += 1
+                    continue
+                if rec and rec.get("status") == "downloaded" and _file_alive(rec):
                     # dysync AutoDistinct: a higher-priority kind claims the
                     # video first; re-queue under the new target when the
                     # existing record came from a lower-priority kind.
-                    if (auto_distinct and rec.get("status") == "downloaded"
+                    if (auto_distinct
                             and kind_rank.get(t.get("kind"), 99) < kind_rank.get(rec.get("kind"), 99)):
                         store.upsert_record({
                             "video_id": vid_id,
@@ -325,12 +517,14 @@ class SyncEngine:
                             "target_id": t.get("id"), "status": "queued",
                             "thumbnail_url": _thumb_url(vid_id),
                         })
-                        await self._enqueue_download(profile, t, vid_id)
+                        await self._enqueue_download(
+                            profile, t, vid_id, episode=_next_episode(t["id"]),
+                        )
                         new_count += 1
                     else:
                         skipped += 1
                     continue
-                if _find_existing_file(profile, vid_id):
+                if not rec and _find_existing_file(profile, vid_id):
                     store.upsert_record({
                         "video_id": vid_id,
                         "video_title": entry.get("title"),
@@ -355,7 +549,9 @@ class SyncEngine:
                     "target_id": t.get("id"), "status": "queued",
                     "thumbnail_url": _thumb_url(vid_id),
                 })
-                await self._enqueue_download(profile, t, vid_id)
+                await self._enqueue_download(
+                    profile, t, vid_id, episode=_next_episode(t["id"]),
+                )
                 new_count += 1
 
             store.finish_sync_run(
@@ -397,6 +593,7 @@ class SyncEngine:
         target: Dict[str, Any],
         video_id: str,
         dest_folder: Optional[str] = None,
+        episode: int = 1,
     ) -> None:
         if dest_folder:
             folder = Path(dest_folder)
@@ -420,7 +617,12 @@ class SyncEngine:
             except Exception:
                 pass
         settings = store.get_all_settings()
-        naming = settings.get("video_naming_template") or "%(title)s_[%(id)s].%(ext)s"
+        naming = _naming_template(profile, target, settings, episode)
+
+        # Global app settings (rate limit / proxy / retries) used to be skipped
+        # entirely here, so sync downloads ignored them.
+        gd = await asyncio.to_thread(_global_download_defaults)
+
         await download_manager.start_download({
             "url": f"https://www.youtube.com/watch?v={video_id}",
             "path": str(folder),
@@ -432,6 +634,11 @@ class SyncEngine:
             "save_description": bool(settings.get("save_description", False)),
             "cookie_file": cookie_file,
             "browser_cookies": browser_cookies,
+            "rate_limit": gd.get("rate_limit"),
+            "proxy_url": gd.get("proxy_url"),
+            "geo_proxy_url": gd.get("geo_proxy_url"),
+            "retries": gd.get("retries"),
+            "fragment_retries": gd.get("fragment_retries"),
         })
 
 

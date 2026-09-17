@@ -42,7 +42,10 @@ def _connect_readonly() -> Optional[sqlite3.Connection]:
     if not _DB_FILE.exists():
         return None
     try:
-        conn = sqlite3.connect(f"file:{_DB_FILE.as_posix()}?mode=ro", uri=True)
+        # as_uri() yields the required three-slash form (file:///C:/...). The
+        # previous "file:C:/..." was parsed as a relative path and could fail
+        # on absolute Windows paths, silently falling back to a full scan.
+        conn = sqlite3.connect(f"{_DB_FILE.as_uri()}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
         try:
             conn.execute("PRAGMA journal_mode=WAL;")
@@ -212,21 +215,43 @@ async def add_entry(
     download_options: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Add a history entry. download_options keys must match official
-    ytsage_gui_main.py L1013-1025 so the desktop app can read them."""
+    ytsage_gui_main.py L1013-1025 so the desktop app can read them.
+
+    Upstream HistoryManager derives the row id from a millisecond timestamp
+    and swallows the resulting PRIMARY KEY conflict, returning "". With up to
+    10 concurrent downloads finishing together that is reachable, so retry a
+    couple of times before giving up (upstream code is left untouched - this
+    fork must stay able to pull from the upstream repo).
+    """
     if not _available():
         return ""
-    return await asyncio.to_thread(
-        _with_retry,
-        _OfficialHistoryManager.add_entry,
-        title,
-        url,
-        thumbnail_url,
-        file_path,
-        format_id or "",
-        is_audio_only,
-        resolution or "",
-        None,
-        channel,
-        duration,
-        download_options,
+    last_error: Optional[str] = None
+    for attempt in range(3):
+        try:
+            entry_id = await asyncio.to_thread(
+                _with_retry,
+                _OfficialHistoryManager.add_entry,
+                title,
+                url,
+                thumbnail_url,
+                file_path,
+                format_id or "",
+                is_audio_only,
+                resolution or "",
+                None,
+                channel,
+                duration,
+                download_options,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[WebUI] history add_entry raised: {e}")
+            entry_id = ""
+            last_error = str(e)
+        if entry_id:
+            return entry_id
+        if attempt < 2:
+            await asyncio.sleep(0.05 * (attempt + 1))
+    logger.warning(
+        f"[WebUI] history entry was not saved (id collision?): {title} {last_error or ''}"
     )
+    return ""

@@ -119,9 +119,15 @@
             <el-option v-for="k in ALL_KINDS" :key="k.value" :label="k.label" :value="k.value" />
           </el-select>
         </el-form-item>
-        <template v-if="targetDlg.form.kind === 'playlist' || targetDlg.form.kind === 'channel'">
+        <template v-if="needsUrl(targetDlg.form.kind)">
           <el-form-item :label="t('web.sync.url')" required>
             <el-input v-model="targetDlg.form.url" :placeholder="t('web.sync.url_ph')" />
+          </el-form-item>
+          <!-- dysync 自定义收藏夹: pick from the account's own playlists -->
+          <el-form-item v-if="targetDlg.form.kind === 'playlist'" label="">
+            <el-button size="small" :loading="discovering" @click="openDiscover">
+              {{ t('web.sync.discover_playlists') }}
+            </el-button>
           </el-form-item>
         </template>
         <el-alert v-else type="info" :closable="false" :title="t('web.sync.cookie_kind_hint')" />
@@ -138,6 +144,28 @@
         <el-button type="primary" :loading="targetDlg.saving" @click="saveTarget">{{ t('web.sync.save') }}</el-button>
       </template>
     </el-dialog>
+
+    <!-- dysync 自定义收藏夹: tick the account's own playlists -->
+    <el-dialog v-model="discover.visible" :title="t('web.sync.discover_playlists')" width="640px">
+      <el-table
+        v-loading="discovering"
+        :data="discover.items"
+        size="small"
+        max-height="380"
+        @selection-change="(rows) => (discover.selected = rows)"
+      >
+        <el-table-column type="selection" width="44" />
+        <el-table-column prop="title" :label="t('web.sync.title')" min-width="220" show-overflow-tooltip />
+        <el-table-column prop="video_count" :label="t('web.sync.stat_total_videos')" width="110" />
+        <el-table-column prop="channel" :label="t('web.sync.col_channel')" width="140" show-overflow-tooltip />
+      </el-table>
+      <template #footer>
+        <el-button @click="discover.visible = false">{{ t('web.sync.cancel') }}</el-button>
+        <el-button type="primary" :disabled="!discover.selected.length" @click="addDiscovered">
+          {{ t('web.sync.save') }} ({{ discover.selected.length }})
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -148,32 +176,42 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Close, FolderOpened } from '@element-plus/icons-vue'
 import {
   listProfiles, getProfile, createProfile, updateProfile, deleteProfile,
-  createTarget, updateTarget, deleteTarget, runSync,
+  createTarget, updateTarget, deleteTarget, runSync, discoverPlaylists,
 } from '@/api/sync'
 import { errText } from '@/api/http'
 
 const { t } = useI18n()
 
+const KIND_ICONS = {
+  liked: '❤️ ', favorites: '⭐ ', playlist: '📁 ', channel: '📺 ',
+  subscriptions: '🌟 ', mix: '🎲 ', series: '🎬 ', posts: '🖼️ ',
+}
 const KINDS = [
   { value: 'playlist', key: 'web.sync.kind_playlist' },
   { value: 'liked', key: 'web.sync.kind_liked' },
   { value: 'favorites', key: 'web.sync.kind_favorites' },
   { value: 'channel', key: 'web.sync.kind_channel' },
   { value: 'subscriptions', key: 'web.sync.kind_subs' },
+  // dysync parity: 合集 / 短剧 / 图文
+  { value: 'mix', key: 'web.sync.kind_mix' },
+  { value: 'series', key: 'web.sync.kind_series' },
+  { value: 'posts', key: 'web.sync.kind_posts' },
 ]
-const ALL_KINDS = [
-  { value: 'liked', label: '❤️ ' + t('web.sync.kind_liked') },
-  { value: 'favorites', label: '⭐ ' + t('web.sync.kind_favorites') },
-  { value: 'playlist', label: '📁 ' + t('web.sync.kind_playlist') },
-  { value: 'channel', label: '📺 ' + t('web.sync.kind_channel') },
-  { value: 'subscriptions', label: '🌟 ' + t('web.sync.kind_subs') },
-]
+const ALL_KINDS = KINDS.map((k) => ({
+  value: k.value,
+  label: (KIND_ICONS[k.value] || '') + t(k.key),
+}))
+
+// mix / series / posts are URL-less kinds only when the user leaves the URL
+// empty; series and mix are normally pointed at a concrete playlist URL.
+function needsUrl(kind) {
+  return ['playlist', 'channel', 'mix', 'series', 'posts'].includes(kind)
+}
 
 function kindLabel(k) {
   const hit = KINDS.find((x) => x.value === k)
   if (!hit) return k
-  const s = t(hit.key)
-  return { liked: '❤️ ' + s, favorites: '⭐ ' + s, playlist: '📁 ' + s, channel: '📺 ' + s, subscriptions: '🌟 ' + s }[k] || s
+  return (KIND_ICONS[k] || '') + t(hit.key)
 }
 
 const profiles = ref([])
@@ -259,7 +297,52 @@ function openTarget(p, tg) {
 
 function onKindChange(k) {
   // liked / favorites / subscriptions derive their URL from the engine defaults
-  if (k === 'liked' || k === 'favorites' || k === 'subscriptions') targetDlg.form.url = ''
+  if (!needsUrl(k)) targetDlg.form.url = ''
+}
+
+// ---- playlist discovery (dysync 自定义收藏夹) ---------------------------
+
+const discovering = ref(false)
+const discover = reactive({ visible: false, items: [], selected: [] })
+
+async function openDiscover() {
+  discover.visible = true
+  discover.items = []
+  discover.selected = []
+  discovering.value = true
+  try {
+    const r = await discoverPlaylists(targetDlg.profileId)
+    discover.items = r.playlists || []
+    if (!discover.items.length) ElMessage.info(t('web.sync.discover_failed'))
+  } catch (e) {
+    ElMessage.error(t('web.sync.discover_failed') + ': ' + errText(e))
+    discover.visible = false
+  } finally {
+    discovering.value = false
+  }
+}
+
+async function addDiscovered() {
+  discovering.value = true
+  let ok = 0
+  try {
+    for (const pl of discover.selected) {
+      if (!pl.url) continue
+      await createTarget(targetDlg.profileId, {
+        kind: 'playlist', url: pl.url, title: pl.title, enabled: true,
+      })
+      ok++
+    }
+    discover.visible = false
+    targetDlg.visible = false
+    ElMessage.success(t('web.sync.saved'))
+    load()
+  } catch (e) {
+    ElMessage.error(errText(e))
+  } finally {
+    discovering.value = false
+    void ok
+  }
 }
 
 async function saveTarget() {

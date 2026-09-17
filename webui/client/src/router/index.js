@@ -83,6 +83,12 @@ const routes = [
         name: 'Sync Settings',
         component: () => import('@/views/sync/SyncSettings.vue'),
       },
+      {
+        // dysync parity: 支持移动端 - phone-sized view of the sync centre.
+        path: 'sync/mobile',
+        name: 'Sync Mobile',
+        component: () => import('@/views/sync/MobileSync.vue'),
+      },
       { path: 'about', name: 'About', component: () => import('@/views/About.vue') },
     ],
   },

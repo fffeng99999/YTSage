@@ -27,6 +27,37 @@
         <el-form-item :label="t('web.sync.set_auto_clean_logs')">
           <el-switch v-model="form.auto_clean_logs" />
         </el-form-item>
+        <el-form-item :label="t('web.sync.set_retry_failed')">
+          <el-switch v-model="form.retry_failed" />
+        </el-form-item>
+        <el-form-item>
+          <el-button type="primary" :loading="saving" @click="save">{{ t('web.sync.save') }}</el-button>
+        </el-form-item>
+      </el-form>
+    </div>
+
+    <!-- Anti-bot / throttling (dysync parity) -->
+    <div class="yts-card">
+      <div class="yts-card-title">{{ t('web.sync.anti_bot_section') }}</div>
+      <el-form label-width="240px" size="default">
+        <el-form-item :label="t('web.sync.set_anti_bot')">
+          <el-switch v-model="form.anti_bot_enabled" />
+        </el-form-item>
+        <el-form-item :label="t('web.sync.set_sleep_min')">
+          <el-input-number v-model="form.sleep_min" :min="0" :max="60" :disabled="!form.anti_bot_enabled" />
+        </el-form-item>
+        <el-form-item :label="t('web.sync.set_sleep_max')">
+          <el-input-number v-model="form.sleep_max" :min="0" :max="120" :disabled="!form.anti_bot_enabled" />
+        </el-form-item>
+        <el-form-item :label="t('web.sync.set_ua_disguise')">
+          <el-switch v-model="form.ua_disguise" :disabled="!form.anti_bot_enabled" />
+        </el-form-item>
+        <el-form-item :label="t('web.sync.set_user_agent')">
+          <el-input v-model="form.user_agent" style="width: 360px" :disabled="!form.anti_bot_enabled" placeholder="Mozilla/5.0 ..." />
+        </el-form-item>
+        <el-form-item>
+          <span class="help">{{ t('web.sync.anti_bot_hint') }}</span>
+        </el-form-item>
         <el-form-item>
           <el-button type="primary" :loading="saving" @click="save">{{ t('web.sync.save') }}</el-button>
         </el-form-item>
@@ -58,6 +89,9 @@
       <el-form label-width="240px" size="default">
         <el-form-item :label="t('web.sync.nfo_enabled')">
           <el-switch v-model="form.nfo_enabled" />
+        </el-form-item>
+        <el-form-item :label="t('web.sync.set_episode_naming')">
+          <el-switch v-model="form.episode_naming" />
         </el-form-item>
         <el-form-item :label="t('web.sync.share_link')">
           <el-switch v-model="form.share_link_enabled" />

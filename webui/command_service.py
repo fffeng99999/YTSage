@@ -8,7 +8,10 @@ Output streams to the WebSocket event bus as command_output events.
 
 import asyncio
 import logging
+import os
 import shlex
+import signal
+import subprocess
 import sys
 import uuid
 from typing import Any, Dict, Optional
@@ -20,10 +23,69 @@ from .yt_dlp_finder import get_yt_dlp_path
 
 logger = logging.getLogger("ytsage.webui")
 
+# yt-dlp options that spawn processes, read arbitrary files, or pull in extra
+# configuration. Passing them through the "custom command" box turned the
+# endpoint into remote code execution, so they are rejected outright.
+_BLOCKED_OPTION_NAMES = {
+    "exec",                      # --exec CMD
+    "exec-before-download",
+    "external-downloader",       # can be "external:..."
+    "external-downloader-args",
+    "downloader",
+    "config-location",           # injects arbitrary options
+    "config-locations",
+    "batch-file",                # reads arbitrary files
+    "load-info-json",
+    "ffmpeg-location",           # runs an arbitrary binary
+    "output",                    # writes anywhere; -P already sets the dir
+    "output-na-placeholder",
+}
+
+# Short flags that map onto the blocked long options above.
+_SHORT_TO_LONG = {"o": "output", "a": "batch-file"}
+
 
 class CommandService:
     def __init__(self) -> None:
         self._procs: Dict[str, asyncio.subprocess.Process] = {}
+
+    @staticmethod
+    def find_blocked_option(command: str) -> Optional[str]:
+        """Return the first dangerous option in ``command``, or None.
+
+        Matching is prefix-based because yt-dlp's option parser accepts
+        unambiguous abbreviations (``--exe`` == ``--exec``).
+        """
+        try:
+            args = shlex.split(command or "")
+        except ValueError:
+            args = (command or "").split()
+        for raw in args:
+            token = (raw or "").strip()
+            if not token.startswith("-") or token == "-":
+                continue
+            name = token.split("=", 1)[0]
+            if name.startswith("--"):
+                base = name[2:].lower()
+                if not base:
+                    continue
+                for blocked in _BLOCKED_OPTION_NAMES:
+                    if base == blocked:
+                        return name
+                    # optparse accepts unambiguous abbreviations (--exe ==
+                    # --exec). Only enabled from 3 chars up, otherwise very
+                    # short names would match half the blacklist.
+                    if len(base) >= 3 and (
+                        base.startswith(blocked) or blocked.startswith(base)
+                    ):
+                        return name
+            else:
+                # Short flags are matched exactly via the alias map: prefix
+                # matching here made "-f" collide with "ffmpeg-location".
+                long_name = _SHORT_TO_LONG.get(name[1:].lower())
+                if long_name and long_name in _BLOCKED_OPTION_NAMES:
+                    return name
+        return None
 
     async def run(self, command: str, url: Optional[str] = None, path: Optional[str] = None) -> str:
         exec_id = uuid.uuid4().hex[:12]
