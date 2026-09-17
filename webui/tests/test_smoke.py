@@ -239,6 +239,83 @@ def test_target_kind_validation():
         check("UpdateTarget validates kind too", True)
 
 
+# ---------------------------------------------------------------------------
+# 7. Database backends + migration (dysync: DatabaseMigrationService)
+# ---------------------------------------------------------------------------
+
+def test_dialect_ddl():
+    """Each engine needs its own DDL / upsert syntax."""
+    from webui.sync import db
+
+    lite, my, pg = (db.get_dialect(n) for n in ("sqlite", "mysql", "postgresql"))
+
+    check("sqlite AUTOINCREMENT", "AUTOINCREMENT" in lite.create_table("profiles"))
+    check("mysql AUTO_INCREMENT", "AUTO_INCREMENT" in my.create_table("profiles"))
+    check("postgresql SERIAL", "SERIAL" in pg.create_table("profiles"))
+
+    check("sqlite placeholder is ?", lite.placeholder == "?")
+    check("mysql placeholder is %s", my.placeholder == "%s")
+    check("postgresql placeholder is %s", pg.placeholder == "%s")
+
+    check("sqlite upsert", lite.insert_or_replace("sync_settings", ("key", "value")).startswith("INSERT OR REPLACE"))
+    check("mysql upsert", my.insert_or_replace("sync_settings", ("key", "value")).startswith("REPLACE INTO"))
+    check("pg upsert uses ON CONFLICT", "ON CONFLICT" in pg.insert_or_replace("sync_settings", ("key", "value")))
+    check("pg insert-ignore", "ON CONFLICT DO NOTHING" in pg.insert_or_ignore("excludes", ("video_id",)))
+    check("mysql insert-ignore", my.insert_or_ignore("excludes", ("video_id",)).startswith("INSERT IGNORE"))
+
+    # MySQL refuses a DEFAULT on a TEXT column, so short strings become VARCHAR.
+    my_ddl = my.create_table("profiles")
+    check("mysql keeps DEFAULT on VARCHAR", "dedup_priority VARCHAR(512) DEFAULT" in my_ddl)
+    check("mysql TEXT column has no DEFAULT",
+          "cookie_check_error TEXT DEFAULT" not in my_ddl)
+
+
+def test_database_migration():
+    """dysync 数据库迁移: copy every table from one backend to another."""
+    import shutil
+    import tempfile
+
+    from webui.sync import db
+
+    tmp = Path(tempfile.mkdtemp(prefix="ytsage_dbtest_"))
+    try:
+        src_cfg = {"type": "sqlite", "sqlite_path": str(tmp / "src.db")}
+        dst_cfg = {"type": "sqlite", "sqlite_path": str(tmp / "dst.db")}
+
+        src = db.connect(src_cfg)
+        db.create_schema(src, db.get_dialect("sqlite"))
+        src.execute(
+            "INSERT INTO profiles (name, root_path, dedup_priority) VALUES (?,?,?)",
+            ("src-profile", str(tmp / "videos"), '["liked","playlist"]'),
+        )
+        src.execute("INSERT INTO sync_settings (key,value) VALUES (?,?)", ("k1", "v1"))
+        src.commit()
+
+        result = db.migrate_data(src_cfg, dst_cfg)
+        check("migration succeeded", result.get("ok") is True)
+        check("profiles copied", result.get("tables", {}).get("profiles") == 1)
+        check("rows counted", (result.get("rows") or 0) >= 2)
+        src.close()
+
+        dst = db.connect(dst_cfg)
+        rows = db.dict_rows(dst.execute("SELECT name, root_path, dedup_priority FROM profiles"))
+        check("row data survived the move",
+              bool(rows) and rows[0]["name"] == "src-profile"
+              and rows[0]["dedup_priority"] == '["liked","playlist"]')
+        settings = db.dict_rows(dst.execute("SELECT key, value FROM sync_settings WHERE key='k1'"))
+        check("settings survived the move", settings and settings[0]["value"] == "v1")
+        dst.close()
+
+        # Re-running must be an exact copy, not a merge.
+        db.migrate_data(src_cfg, dst_cfg)
+        dst = db.connect(dst_cfg)
+        n = db.dict_rows(dst.execute("SELECT COUNT(*) c FROM profiles"))[0]["c"]
+        check("re-migration replaces instead of duplicating", n == 1)
+        dst.close()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     for fn in (
         test_job_fields_cover_command_builder,
@@ -251,6 +328,8 @@ def main():
         test_anti_bot_options,
         test_episode_naming,
         test_target_kind_validation,
+        test_dialect_ddl,
+        test_database_migration,
     ):
         print(f"--- {fn.__name__} ---")
         try:

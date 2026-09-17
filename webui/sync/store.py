@@ -22,143 +22,96 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..official_bridge import APP_DATA_DIR
+from . import db
 
+# Kept for backwards compatibility (default SQLite location).
 DB_FILE = APP_DATA_DIR / "ytsage_sync.db"
 
 _lock = threading.RLock()
-_conn: Optional[sqlite3.Connection] = None
-
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS profiles (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT NOT NULL,
-  cookie_source TEXT DEFAULT 'browser',
-  cookie_browser TEXT DEFAULT 'chrome',
-  cookie_browser_profile TEXT DEFAULT '',
-  cookie_file_path TEXT,
-  root_path TEXT NOT NULL,
-  only_recent INTEGER DEFAULT 0,
-  recent_limit INTEGER DEFAULT 20,
-  folder_by_title INTEGER DEFAULT 1,
-  enabled INTEGER DEFAULT 1,
-  dedup_priority TEXT DEFAULT '["liked","favorites","playlist","channel","subscriptions"]',
-  created_at REAL,
-  updated_at REAL
-);
-CREATE TABLE IF NOT EXISTS targets (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  profile_id INTEGER NOT NULL,
-  kind TEXT NOT NULL,          -- playlist | liked | channel | subscriptions
-  url TEXT NOT NULL,
-  title TEXT,
-  folder TEXT,
-  enabled INTEGER DEFAULT 1,
-  sort_index INTEGER DEFAULT 0,
-  created_at REAL,
-  sync_mode TEXT DEFAULT 'sync',
-  save_path TEXT,
-  channel_id TEXT,
-  avatar_url TEXT,
-  last_sync_at REAL
-);
-CREATE TABLE IF NOT EXISTS records (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  video_id TEXT NOT NULL UNIQUE,
-  video_title TEXT,
-  channel TEXT,
-  url TEXT,
-  kind TEXT,
-  profile_id INTEGER,
-  target_id INTEGER,
-  file_path TEXT,
-  size INTEGER DEFAULT 0,
-  duration REAL,
-  status TEXT DEFAULT 'downloaded', -- downloaded | excluded | failed | missing
-  last_sync REAL, first_sync REAL,
-  download_job_id TEXT,
-  thumbnail_url TEXT,
-  deleted_at REAL,
-  nfo_generated INTEGER DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS excludes (
-  video_id TEXT PRIMARY KEY,
-  reason TEXT,
-  created_at REAL
-);
-CREATE TABLE IF NOT EXISTS schedules (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  profile_id INTEGER NOT NULL,
-  mode TEXT DEFAULT 'interval',  -- interval | daily | weekly
-  interval_min INTEGER DEFAULT 60,
-  hour INTEGER DEFAULT 0,
-  minute INTEGER DEFAULT 0,
-  weekday INTEGER DEFAULT 1,
-  enabled INTEGER DEFAULT 1,
-  last_run REAL, next_run REAL,
-  created_at REAL
-);
-CREATE TABLE IF NOT EXISTS sync_runs (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  run_at REAL, finished_at REAL,
-  profile_id INTEGER, kind TEXT,
-  total INTEGER DEFAULT 0, new_count INTEGER DEFAULT 0,
-  skipped INTEGER DEFAULT 0, failed INTEGER DEFAULT 0,
-  summary TEXT
-);
-CREATE TABLE IF NOT EXISTS sync_settings (
-  key TEXT PRIMARY KEY,
-  value TEXT
-);
-CREATE TABLE IF NOT EXISTS sync_daily_stats (
-  date TEXT PRIMARY KEY,
-  total_videos INTEGER DEFAULT 0,
-  total_size INTEGER DEFAULT 0,
-  liked_count INTEGER DEFAULT 0,
-  playlist_count INTEGER DEFAULT 0,
-  channel_count INTEGER DEFAULT 0,
-  subs_count INTEGER DEFAULT 0,
-  new_synced INTEGER DEFAULT 0
-);
-"""
+_conn = None
+_dialect = None
 
 
-def _connect() -> sqlite3.Connection:
-    global _conn
+def dialect():
+    """Active SQL dialect (sqlite / mysql / postgresql)."""
+    global _dialect
+    if _dialect is None:
+        _dialect = db.get_dialect(db.load_config().get("type"))
+    return _dialect
+
+
+def _adapt(sql: str) -> str:
+    """Rewrite `?` placeholders for drivers that want `%s`.
+
+    Every statement in this module is written with `?`; no string literal in
+    them contains a question mark, so a plain replace is safe.
+    """
+    d = dialect()
+    return sql if d.placeholder == "?" else sql.replace("?", d.placeholder)
+
+
+def _connect():
+    """Open (once) the connection described by the database configuration."""
+    global _conn, _dialect
     with _lock:
         if _conn is None:
+            cfg = db.load_config()
+            _dialect = db.get_dialect(cfg.get("type"))
             APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
-            _conn = sqlite3.connect(str(DB_FILE), check_same_thread=False, timeout=10)
-            _conn.row_factory = sqlite3.Row
-            _conn.execute("PRAGMA journal_mode=WAL;")
-            _conn.execute("PRAGMA busy_timeout=5000;")
-            _conn.executescript(_SCHEMA)
+            _conn = db.connect(cfg)
+            db.create_schema(_conn, _dialect)
             _migrate(_conn)
             _conn.commit()
         return _conn
 
 
-def _migrate(conn: sqlite3.Connection) -> None:
-    """Add new columns to existing tables (for database upgrades)."""
+def reset_connection() -> None:
+    """Drop the cached connection (used after switching database engine)."""
+    global _conn, _dialect
+    with _lock:
+        if _conn is not None:
+            try:
+                _conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+        _conn = None
+        _dialect = None
+
+
+def _migrate(conn) -> None:
+    """Add new columns to existing tables (works on all three engines).
+
+    Types are generic so the dialect can emit something valid - MySQL rejects a
+    DEFAULT on a TEXT column, hence VARCHAR for the short string columns.
+    """
+    d = dialect()
     migrations = [
-        ("targets", "sync_mode", "TEXT DEFAULT 'sync'"),
-        ("targets", "save_path", "TEXT"),
-        ("targets", "channel_id", "TEXT"),
-        ("targets", "avatar_url", "TEXT"),
-        ("targets", "last_sync_at", "REAL"),
-        ("records", "thumbnail_url", "TEXT"),
-        ("records", "deleted_at", "REAL"),
-        ("records", "nfo_generated", "INTEGER DEFAULT 0"),
+        ("targets", "sync_mode", "STR", "DEFAULT 'sync'"),
+        ("targets", "save_path", "STR", ""),
+        ("targets", "channel_id", "STR", ""),
+        ("targets", "avatar_url", "STR", ""),
+        ("targets", "last_sync_at", "REAL", ""),
+        ("records", "thumbnail_url", "STR", ""),
+        ("records", "deleted_at", "REAL", ""),
+        ("records", "nfo_generated", "INT", "DEFAULT 0"),
         # dysync parity: cookie expiry is watched automatically, not only when
         # the user opens the cookie page.
-        ("profiles", "cookie_invalid", "INTEGER DEFAULT 0"),
-        ("profiles", "cookie_checked_at", "REAL"),
-        ("profiles", "cookie_check_error", "TEXT"),
+        ("profiles", "cookie_invalid", "INT", "DEFAULT 0"),
+        ("profiles", "cookie_checked_at", "REAL", ""),
+        ("profiles", "cookie_check_error", "TEXT", ""),
     ]
-    for table, column, col_type in migrations:
+    for table, column, kind, extra in migrations:
+        if not d.supports_default_on_text and kind == "TEXT" and "DEFAULT" in extra.upper():
+            extra = ""
+        col_type = d.column_type(kind)
         try:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
-        except sqlite3.OperationalError:
-            pass  # Column already exists
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type} {extra}".strip())
+            conn.commit()
+        except Exception:  # noqa: BLE001 - column already exists on all engines
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def _empty_row():
@@ -171,33 +124,56 @@ def now() -> float:
 
 def _rows(sql: str, params: tuple = ()) -> List[Dict[str, Any]]:
     with _lock:
-        cur = _connect().execute(sql, params)
-        return [dict(r) for r in cur.fetchall()]
+        cur = _connect().execute(_adapt(sql), tuple(params))
+        try:
+            return db.dict_rows(cur)
+        finally:
+            try:
+                cur.close()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def _row(sql: str, params: tuple = ()) -> Optional[Dict[str, Any]]:
-    with _lock:
-        cur = _connect().execute(sql, params)
-        r = cur.fetchone()
-        return dict(r) if r else None
+    rows = _rows(sql, params)
+    return rows[0] if rows else None
 
 
 def _exec(sql: str, params: tuple = ()) -> int:
     with _lock:
-        cur = _connect().execute(sql, params)
-        _connect().commit()
-        return cur.lastrowid
+        conn = _connect()
+        cur = conn.execute(_adapt(sql), tuple(params))
+        conn.commit()
+        # Only INSERTs can produce a meaningful id, and psycopg2 has no
+        # lastrowid at all - the dialect knows how to ask.
+        last = dialect().last_insert_id(cur) if sql.lstrip().upper().startswith("INSERT") else 0
+        try:
+            cur.close()
+        except Exception:  # noqa: BLE001
+            pass
+        return last
 
 
 def _execmany(sql: str, seq) -> None:
     with _lock:
-        _connect().executemany(sql, seq)
-        _connect().commit()
+        conn = _connect()
+        cur = conn.executemany(_adapt(sql), list(seq))
+        conn.commit()
+        try:
+            cur.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _table_columns(table: str) -> set:
-    """Real column names of ``table`` (read fresh so migrations are picked up)."""
-    return {r["name"] for r in _rows(f"PRAGMA table_info({table})")}
+    """Real column names of ``table`` (read fresh so migrations are picked up).
+
+    PRAGMA table_info is SQLite-only, so the dialect supplies the equivalent
+    information_schema query for MySQL / PostgreSQL.
+    """
+    d = dialect()
+    sql, params = d.table_columns_sql(table)
+    return d.table_columns_from_rows(_rows(sql, tuple(params)))
 
 
 def _assignments(table: str, data: Dict[str, Any]):
@@ -559,7 +535,7 @@ def is_excluded(video_id: str) -> bool:
 
 
 def exclude_video(video_id: str, reason: str = "manual") -> None:
-    _exec("INSERT OR IGNORE INTO excludes (video_id,reason,created_at) VALUES (?,?,?)",
+    _exec(dialect().insert_or_ignore("excludes", ("video_id", "reason", "created_at")),
           (video_id, reason, now()))
     _exec("UPDATE records SET status='excluded' WHERE video_id=?", (video_id,))
 
@@ -676,12 +652,20 @@ def get_all_settings() -> Dict[str, Any]:
     return out
 
 
+def set_setting(key: str, value: Any) -> None:
+    """Insert-or-update one sync setting, dialect aware.
+
+    Callers used to hard-code "INSERT OR REPLACE", which PostgreSQL rejects.
+    """
+    _exec(dialect().insert_or_replace("sync_settings", ("key", "value")),
+          (key, json.dumps(value)))
+
+
 def set_settings(data: Dict[str, Any]) -> None:
     for k, v in data.items():
         if k not in DEFAULT_SETTINGS:
             continue
-        _exec("INSERT OR REPLACE INTO sync_settings (key,value) VALUES (?,?)",
-              (k, json.dumps(v)))
+        set_setting(k, v)
 
 
 # ---------------------------------------------------------------------------

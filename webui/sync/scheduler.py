@@ -93,10 +93,7 @@ async def _maybe_cookie_sweep(now_ts: float) -> None:
         row = store._row("SELECT value FROM sync_settings WHERE key=?", (_COOKIE_SWEEP_KEY,))
         if row and row["value"] and json.loads(row["value"]) == today:
             return
-        store._exec(
-            "INSERT OR REPLACE INTO sync_settings (key,value) VALUES (?,?)",
-            (_COOKIE_SWEEP_KEY, json.dumps(today)),
-        )
+        store.set_setting(_COOKIE_SWEEP_KEY, today)
 
         from .routes import check_cookie  # local import: routes imports scheduler
 
@@ -130,8 +127,7 @@ async def _maybe_daily_clean(now_ts: float) -> None:
     today = datetime.fromtimestamp(now_ts).strftime("%Y-%m-%d")
     if _clean_marker() == today:
         return
-    store._exec("INSERT OR REPLACE INTO sync_settings (key,value) VALUES (?,?)",
-                (_LAST_CLEAN_KEY, json.dumps(today)))
+    store.set_setting(_LAST_CLEAN_KEY, today)
     removed = await prune_old_logs()
     logger.info(f"[sync] daily log auto-clean removed {removed} file(s)")
 

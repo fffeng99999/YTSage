@@ -16,7 +16,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from .. import history_service
-from . import scheduler, store
+from . import db, scheduler, store
 from .engine import engine as sync_engine
 from . import streaming, nfo_service, subscription_service
 
@@ -128,6 +128,18 @@ class CreateSchedule(BaseModel):
     minute: int = 0
     weekday: int = 1
     enabled: bool = True
+
+
+class DatabaseConfigRequest(BaseModel):
+    """dysync parity: pick the sync database (sqlite / mysql / postgresql)."""
+    type: str = Field(pattern=r"^(sqlite|mysql|postgresql)$")
+    sqlite_path: Optional[str] = None
+    host: Optional[str] = None
+    port: Optional[int] = None
+    database: Optional[str] = None
+    user: Optional[str] = None
+    password: Optional[str] = None
+    ssl: Optional[bool] = None
 
 
 class UpdateSchedule(BaseModel):
@@ -747,8 +759,7 @@ def _cookie_cache_set(profile_id: int, valid: Optional[bool], error: str = "") -
     import json as _json
     cache = _cookie_cache()
     cache[str(profile_id)] = {"valid": valid, "checked_at": time.time(), "error": error}
-    store._exec("INSERT OR REPLACE INTO sync_settings (key,value) VALUES (?,?)",
-                (_COOKIE_CACHE_KEY, _json.dumps(cache)))
+    store.set_setting(_COOKIE_CACHE_KEY, cache)
 
 
 @router.get("/cookies/status")
@@ -884,3 +895,94 @@ async def discover_playlists(profile_id: int):
             "channel": e.get("channel") or e.get("uploader"),
         })
     return {"playlists": items}
+
+
+# ---------------------------------------------------------------------------
+# Database backend (dysync: DatabaseConfigurationService / DatabaseMigrationService)
+# ---------------------------------------------------------------------------
+
+def _merge_db_config(req: "DatabaseConfigRequest") -> Dict[str, Any]:
+    """Overlay the request onto the stored config.
+
+    A blank password with an otherwise unchanged connection means "keep the
+    saved one" - the UI never displays it back.
+    """
+    cfg = db.load_config()
+    data = req.model_dump(exclude_none=True)
+    same_target = (
+        data.get("type") == cfg.get("type")
+        and data.get("host") == cfg.get("host")
+        and data.get("database") == cfg.get("database")
+    )
+    if same_target and not data.get("password"):
+        data.pop("password", None)
+    cfg.update(data)
+    return cfg
+
+
+@router.get("/database/config")
+async def get_database_config():
+    """Current backend config (password masked) + supported engines."""
+    return {"config": await asyncio.to_thread(db.describe)}
+
+
+@router.post("/database/test")
+async def test_database(req: DatabaseConfigRequest):
+    """Check that a backend is reachable before switching to it."""
+    cfg = _merge_db_config(req)
+    result = await asyncio.to_thread(db.test_connection, cfg)
+    if not result.get("ok"):
+        raise HTTPException(400, result.get("error") or "connection failed")
+    return result
+
+
+@router.get("/database/migration/status")
+async def get_migration_status():
+    return {"status": await asyncio.to_thread(db.migration_status),
+            "history": await asyncio.to_thread(db.migration_history)}
+
+
+@router.post("/database/migrate")
+async def migrate_database(req: DatabaseConfigRequest):
+    """Switch the sync database and carry all data over (dysync 数据库迁移).
+
+    The target is rebuilt from the current backend, so the result is an exact
+    copy. Runs only when no sync is in progress.
+    """
+    if await asyncio.to_thread(sync_engine.is_running):
+        raise HTTPException(409, "A sync is running - stop it before migrating")
+
+    target = _merge_db_config(req)
+    probe = await asyncio.to_thread(db.test_connection, target)
+    if not probe.get("ok"):
+        raise HTTPException(400, f"target connection failed: {probe.get('error')}")
+
+    current = db.load_config()
+    result = await asyncio.to_thread(db.migrate_data, current, target)
+    if not result.get("ok"):
+        raise HTTPException(500, f"migration failed: {result.get('error')}")
+
+    await asyncio.to_thread(db.save_config, target)
+    await asyncio.to_thread(store.reset_connection)
+    result["config"] = await asyncio.to_thread(db.describe)
+    return result
+
+
+@router.post("/database/switch")
+async def switch_database(req: DatabaseConfigRequest):
+    """Point the sync centre at another (already prepared) backend.
+
+    Unlike /database/migrate this does NOT copy data - useful to move back to
+    a database that already holds the tables.
+    """
+    if await asyncio.to_thread(sync_engine.is_running):
+        raise HTTPException(409, "A sync is running - stop it before switching")
+
+    target = _merge_db_config(req)
+    probe = await asyncio.to_thread(db.test_connection, target)
+    if not probe.get("ok"):
+        raise HTTPException(400, f"target connection failed: {probe.get('error')}")
+
+    await asyncio.to_thread(db.save_config, target)
+    await asyncio.to_thread(store.reset_connection)
+    return {"ok": True, "config": await asyncio.to_thread(db.describe)}

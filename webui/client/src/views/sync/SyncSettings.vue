@@ -102,6 +102,57 @@
       </el-form>
     </div>
 
+    <!-- Database backend (dysync: 数据库配置 + 迁移) -->
+    <div class="yts-card">
+      <div class="yts-card-title">{{ t('web.sync.db_section') }}</div>
+      <el-form label-width="240px" size="default">
+        <el-form-item :label="t('web.sync.db_type')">
+          <el-select v-model="dbForm.type" style="width: 200px" @change="onDbTypeChange">
+            <el-option label="SQLite (default)" value="sqlite" />
+            <el-option label="MySQL" value="mysql" />
+            <el-option label="PostgreSQL" value="postgresql" />
+          </el-select>
+        </el-form-item>
+
+        <template v-if="dbForm.type === 'sqlite'">
+          <el-form-item :label="t('web.sync.db_sqlite_path')">
+            <el-input v-model="dbForm.sqlite_path" style="width: 360px" placeholder="(default)" />
+          </el-form-item>
+        </template>
+        <template v-else>
+          <el-form-item :label="t('web.sync.db_host')">
+            <el-input v-model="dbForm.host" style="width: 240px" />
+          </el-form-item>
+          <el-form-item :label="t('web.sync.db_port')">
+            <el-input-number v-model="dbForm.port" :min="1" :max="65535" />
+          </el-form-item>
+          <el-form-item :label="t('web.sync.db_name')">
+            <el-input v-model="dbForm.database" style="width: 240px" />
+          </el-form-item>
+          <el-form-item :label="t('web.sync.db_user')">
+            <el-input v-model="dbForm.user" style="width: 240px" />
+          </el-form-item>
+          <el-form-item :label="t('web.sync.db_password')">
+            <el-input v-model="dbForm.password" type="password" show-password style="width: 240px" placeholder="(unchanged)" />
+          </el-form-item>
+          <el-form-item :label="t('web.sync.db_ssl')">
+            <el-switch v-model="dbForm.ssl" />
+          </el-form-item>
+        </template>
+
+        <el-form-item>
+          <div class="row">
+            <el-button size="small" :loading="dbTesting" @click="testDb">{{ t('web.sync.db_test') }}</el-button>
+            <el-button size="small" type="primary" :loading="dbBusy" @click="doMigrate">{{ t('web.sync.db_migrate') }}</el-button>
+            <el-button size="small" :loading="dbBusy" @click="doSwitch">{{ t('web.sync.db_switch') }}</el-button>
+          </div>
+        </el-form-item>
+        <el-form-item>
+          <span class="help">{{ t('web.sync.db_driver_hint') }}</span>
+        </el-form-item>
+      </el-form>
+    </div>
+
     <!-- Log maintenance -->
     <div class="yts-card">
       <div class="yts-card-title">{{ t('web.sync.log_maint') }}</div>
@@ -133,13 +184,88 @@
 import { ref, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { getSyncSettings, setSyncSettings, clearSyncLogs, pruneSyncLogs, exportSync, importSync } from '@/api/sync'
+import {
+  getSyncSettings, setSyncSettings, clearSyncLogs, pruneSyncLogs, exportSync, importSync,
+  getDatabaseConfig, testDatabase, migrateDatabase, switchDatabase,
+} from '@/api/sync'
 import { errText } from '@/api/http'
 
 const { t } = useI18n()
 const form = ref({})
 const saving = ref(false)
 const exporting = ref(false)
+
+// ---- database backend ---------------------------------------------------
+
+const dbForm = ref({ type: 'sqlite', sqlite_path: '', host: '127.0.0.1', port: 3306,
+  database: 'ytsage', user: '', password: '', ssl: false })
+const dbTesting = ref(false)
+const dbBusy = ref(false)
+const DEFAULT_PORTS = { mysql: 3306, postgresql: 5432 }
+
+function onDbTypeChange(type) {
+  if (type !== 'sqlite' && (!dbForm.value.port || dbForm.value.port === 3306)) {
+    dbForm.value.port = DEFAULT_PORTS[type] || 3306
+  }
+}
+
+function dbPayload() {
+  const d = { ...dbForm.value }
+  if (d.type === 'sqlite') {
+    return { type: 'sqlite', sqlite_path: d.sqlite_path || '' }
+  }
+  return {
+    type: d.type, host: d.host, port: Number(d.port) || DEFAULT_PORTS[d.type] || 3306,
+    database: d.database, user: d.user, password: d.password || '', ssl: !!d.ssl,
+  }
+}
+
+async function loadDb() {
+  try {
+    const r = await getDatabaseConfig()
+    const c = r.config || {}
+    dbForm.value = {
+      type: c.type || 'sqlite',
+      sqlite_path: c.type === 'sqlite' ? (c.sqlite_path || '') : '',
+      host: c.host || '127.0.0.1',
+      port: c.port || DEFAULT_PORTS[c.type] || 3306,
+      database: c.database || 'ytsage',
+      user: c.user || '',
+      password: '',            // never displayed back
+      ssl: !!c.ssl,
+    }
+  } catch (e) { ElMessage.error(errText(e)) }
+}
+
+async function testDb() {
+  dbTesting.value = true
+  try {
+    await testDatabase(dbPayload())
+    ElMessage.success(t('web.sync.db_test_ok'))
+  } catch (e) {
+    ElMessage.error(t('web.sync.db_test_fail') + ': ' + errText(e))
+  } finally { dbTesting.value = false }
+}
+
+async function doMigrate() {
+  try { await ElMessageBox.confirm(t('web.sync.db_migrate_confirm'), t('web.sync.db_section'), { type: 'warning' }) } catch { return }
+  dbBusy.value = true
+  try {
+    const r = await migrateDatabase(dbPayload())
+    ElMessage.success(t('web.sync.db_migrate_done', { rows: r.rows || 0, n: Object.keys(r.tables || {}).length }))
+    loadDb()
+  } catch (e) { ElMessage.error(errText(e)) } finally { dbBusy.value = false }
+}
+
+async function doSwitch() {
+  try { await ElMessageBox.confirm(t('web.sync.db_switch_confirm'), t('web.sync.db_section'), { type: 'warning' }) } catch { return }
+  dbBusy.value = true
+  try {
+    await switchDatabase(dbPayload())
+    ElMessage.success(t('web.sync.saved'))
+    loadDb()
+  } catch (e) { ElMessage.error(errText(e)) } finally { dbBusy.value = false }
+}
 
 async function load() {
   try { form.value = await getSyncSettings() } catch (e) { ElMessage.error(errText(e)) }
@@ -178,7 +304,7 @@ async function doImport(file) {
   return false
 }
 
-onMounted(load)
+onMounted(() => { load(); loadDb() })
 </script>
 
 <style scoped>

@@ -243,6 +243,28 @@ export function checkCookie(profileId) {
   return api.post(`/sync/cookies/check/${profileId}`).then((r) => r.data)
 }
 
+// ---- database backend (dysync: 数据库配置 / 迁移) -----------------------
+
+export function getDatabaseConfig() {
+  return api.get('/sync/database/config').then((r) => r.data)
+}
+
+export function testDatabase(data) {
+  return api.post('/sync/database/test', data).then((r) => r.data)
+}
+
+export function migrateDatabase(data) {
+  return api.post('/sync/database/migrate', data).then((r) => r.data)
+}
+
+export function switchDatabase(data) {
+  return api.post('/sync/database/switch', data).then((r) => r.data)
+}
+
+export function getMigrationStatus() {
+  return api.get('/sync/database/migration/status').then((r) => r.data)
+}
+
 // dysync parity: sweep every profile at once; auto_disable turns off the ones
 // whose cookie no longer works.
 export function checkAllCookies(autoDisable = false) {
